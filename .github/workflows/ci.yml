@@ -1,0 +1,35 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: kosh
+          POSTGRES_PASSWORD: kosh
+          POSTGRES_DB: kosh
+        ports:
+          - 5442:5432
+        options: >-
+          --health-cmd "pg_isready -U kosh -d kosh"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    env:
+      KOSH_TEST_DATABASE_URL: postgres://kosh:kosh@localhost:5442/postgres?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: vet
+        run: go vet ./...
+      - name: test
+        run: go test -race -count=1 ./...

@@ -1,0 +1,22 @@
+# Binaries
+/bin/
+*.exe
+*.test
+*.out
+
+# Coverage and profiles
+coverage.*
+*.pprof
+
+# Local env
+.env
+.env.local
+
+# Editors
+.idea/
+.vscode/
+*.swp
+
+# Dashboard (phase 6)
+dashboard/node_modules/
+dashboard/.next/

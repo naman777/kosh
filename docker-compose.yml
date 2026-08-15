@@ -1,0 +1,29 @@
+name: kosh
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: kosh
+      POSTGRES_PASSWORD: kosh
+      POSTGRES_DB: kosh
+    # Port 5442 on the host so this never clashes with a local Postgres or
+    # another project's compose stack.
+    ports:
+      - "127.0.0.1:5442:5432"
+    command:
+      - postgres
+      - -c
+      - max_connections=300
+      - -c
+      - shared_buffers=256MB
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kosh -d kosh"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  pgdata:
