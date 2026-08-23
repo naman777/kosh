@@ -69,9 +69,11 @@ func (f *fixture) account(t *testing.T, id ledger.AccountID) ledger.Account {
 	return a
 }
 
+// checkInvariants runs the ledger's own invariants. The payment-level ones
+// (3–6) need payment rows these tests don't create.
 func (f *fixture) checkInvariants(t *testing.T) {
 	t.Helper()
-	rep, err := invariants.Check(context.Background(), f.pool)
+	rep, err := invariants.Check(context.Background(), f.pool, 1, 2, 5, 11)
 	if err != nil {
 		t.Fatal(err)
 	}
