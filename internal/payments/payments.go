@@ -95,18 +95,20 @@ func (s *Service) insertPayment(ctx context.Context, tx pgx.Tx, merchantID uuid.
 	if err != nil {
 		return uuid.Nil, err
 	}
-	id := s.ids.New()
-	now := s.clock.Now()
-	_, err = tx.Exec(ctx, `
+	p, err := scanPayment(tx.QueryRow(ctx, `
 		INSERT INTO payments (id, merchant_id, order_id, amount, method, state, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, 'created', $6, $6)`,
-		id, merchantID, in.OrderID, amount, in.Method, now)
+		VALUES ($1, $2, $3, $4, $5, 'created', $6, $6)
+		RETURNING `+paymentCols,
+		s.ids.New(), merchantID, in.OrderID, amount, in.Method, s.clock.Now()))
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.ConstraintName == "payments_one_live_per_order" {
 		return uuid.Nil, errorf(http.StatusConflict, "order_already_has_payment",
 			"order %s already has a payment that has not failed", in.OrderID)
 	}
-	return id, err
+	if err != nil {
+		return uuid.Nil, err
+	}
+	return p.ID, s.emitPayment(ctx, tx, p)
 }
 
 // applyAuthorization moves a payment out of from according to the bank's answer.

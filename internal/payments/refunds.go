@@ -15,6 +15,7 @@ import (
 	"github.com/naman777/kosh/internal/idempotency"
 	"github.com/naman777/kosh/internal/ledger"
 	"github.com/naman777/kosh/internal/money"
+	"github.com/naman777/kosh/internal/outbox"
 )
 
 // Refund states.
@@ -166,11 +167,29 @@ func (s *Service) reserveRefund(ctx context.Context, tx pgx.Tx, merchantID, paym
 	if err != nil {
 		return uuid.Nil, err
 	}
-	_, err = tx.Exec(ctx, `
+	r, err := scanRefund(tx.QueryRow(ctx, `
 		INSERT INTO refunds (id, payment_id, merchant_id, amount, state, hold_entry_id, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, 'pending', $5, $6, $6)`,
-		refundID, paymentID, merchantID, reserved, holdID, now)
-	return refundID, err
+		VALUES ($1, $2, $3, $4, 'pending', $5, $6, $6)
+		RETURNING `+refundCols,
+		refundID, paymentID, merchantID, reserved, holdID, now))
+	if err != nil {
+		return uuid.Nil, err
+	}
+	return refundID, s.emitRefund(ctx, tx, r)
+}
+
+// emitRefund writes the outbox event for the refund's current version.
+// A new refund's event is refund.created; later ones name the new state.
+func (s *Service) emitRefund(ctx context.Context, tx pgx.Tx, r Refund) error {
+	typ := "refund." + r.State
+	if r.Version == 1 {
+		typ = "refund.created"
+	}
+	_, err := outbox.Write(ctx, tx, s.clock.Now(), outbox.Event{
+		AggregateType: "refund", AggregateID: r.ID, Version: r.Version, MerchantID: r.MerchantID,
+		Type: typ, Payload: r.View(),
+	})
+	return err
 }
 
 func (s *Service) whyNotRefundable(ctx context.Context, tx pgx.Tx, merchantID, paymentID uuid.UUID, amount money.Paise) error {
@@ -247,12 +266,16 @@ func (s *Service) failRefund(ctx context.Context, tx pgx.Tx, r Refund, reason st
 }
 
 func (s *Service) setRefundState(ctx context.Context, tx pgx.Tx, id uuid.UUID, state string, bankRef, reason *string) (Refund, error) {
-	return scanRefund(tx.QueryRow(ctx, `
+	r, err := scanRefund(tx.QueryRow(ctx, `
 		UPDATE refunds
 		SET state = $2, version = version + 1, updated_at = $3,
 		    bank_ref = COALESCE($4, bank_ref), failure_reason = COALESCE($5, failure_reason)
 		WHERE id = $1 AND state = 'pending'
 		RETURNING `+refundCols, id, state, s.clock.Now(), bankRef, reason))
+	if err != nil {
+		return Refund{}, err
+	}
+	return r, s.emitRefund(ctx, tx, r)
 }
 
 // ExpireRefundHolds voids refund holds past their deadline and fails their

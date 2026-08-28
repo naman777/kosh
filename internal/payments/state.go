@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/naman777/kosh/internal/money"
+	"github.com/naman777/kosh/internal/outbox"
 )
 
 // State is a payment's state.
@@ -102,7 +103,16 @@ func (s *Service) transition(ctx context.Context, tx pgx.Tx, id uuid.UUID, from,
 	if err != nil {
 		return Payment{}, fmt.Errorf("payments: transition %s → %s: %w", from, to, err)
 	}
-	return p, nil
+	return p, s.emitPayment(ctx, tx, p)
+}
+
+// emitPayment writes the outbox event for the payment's current version.
+func (s *Service) emitPayment(ctx context.Context, tx pgx.Tx, p Payment) error {
+	_, err := outbox.Write(ctx, tx, s.clock.Now(), outbox.Event{
+		AggregateType: "payment", AggregateID: p.ID, Version: p.Version, MerchantID: p.MerchantID,
+		Type: "payment." + string(p.State), Payload: p.View(),
+	})
+	return err
 }
 
 func (s *Service) getPayment(ctx context.Context, q interface {
