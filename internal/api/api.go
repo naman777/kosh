@@ -71,6 +71,9 @@ func New(svc *payments.Service, adminToken string, log *slog.Logger) *Server {
 		}
 		return s.svc.CreateRefund(ctx, k, id)
 	}))
+	s.mux.HandleFunc("POST /v1/webhooks/replay", s.idempotent(func(ctx context.Context, k idempotency.Key, _ *http.Request) (payments.Response, error) {
+		return s.svc.ReplayWebhooks(ctx, k)
+	}))
 	s.mux.HandleFunc("GET /v1/refunds/{id}", s.merchant(func(w http.ResponseWriter, r *http.Request, m uuid.UUID) {
 		id, ok := s.pathID(w, r)
 		if ok {
