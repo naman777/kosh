@@ -3,6 +3,7 @@ package env
 
 import (
 	"os"
+	"strings"
 	"time"
 )
 
@@ -22,4 +23,19 @@ func Duration(key string, def time.Duration) time.Duration {
 		}
 	}
 	return def
+}
+
+// List splits a comma-separated variable, or returns def.
+func List(key string, def ...string) []string {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	var out []string
+	for _, p := range strings.Split(v, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }

@@ -5,41 +5,44 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"time"
 
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
-// Topic carries every Kosh event.
-const Topic = "kosh.events"
+// DefaultTopic carries every Kosh event.
+const DefaultTopic = "kosh.events"
 
-// EnsureTopic creates the topic if it is missing.
-func EnsureTopic(ctx context.Context, brokers []string, partitions int32) error {
+// EnsureTopic creates topic if it is missing.
+func EnsureTopic(ctx context.Context, brokers []string, topic string, partitions int32) error {
 	cl, err := kgo.NewClient(kgo.SeedBrokers(brokers...))
 	if err != nil {
 		return err
 	}
 	defer cl.Close()
-	resp, err := kadm.NewClient(cl).CreateTopic(ctx, partitions, 1, nil, Topic)
-	if err != nil {
-		return err
+	// kadm reports a per-topic failure both in resp.Err and as the returned
+	// error, so "already exists" has to be tolerated in both places.
+	resp, err := kadm.NewClient(cl).CreateTopic(ctx, partitions, 1, nil, topic)
+	if err == nil {
+		err = resp.Err
 	}
-	if resp.Err != nil && !errors.Is(resp.Err, kerr.TopicAlreadyExists) {
-		return resp.Err
+	if err != nil && !errors.Is(err, kerr.TopicAlreadyExists) {
+		return err
 	}
 	return nil
 }
 
-// KafkaPublisher produces to Topic with acks=all and the idempotent
-// producer, so a retried produce never duplicates within a session.
+// KafkaPublisher produces with acks=all and the idempotent producer, so a
+// retried produce never duplicates within a session.
 type KafkaPublisher struct{ cl *kgo.Client }
 
-// NewKafkaPublisher connects to brokers.
-func NewKafkaPublisher(brokers []string) (*KafkaPublisher, error) {
+// NewKafkaPublisher connects to brokers and produces to topic.
+func NewKafkaPublisher(brokers []string, topic string) (*KafkaPublisher, error) {
 	cl, err := kgo.NewClient(
 		kgo.SeedBrokers(brokers...),
-		kgo.DefaultProduceTopic(Topic),
+		kgo.DefaultProduceTopic(topic),
 		kgo.RequiredAcks(kgo.AllISRAcks()),
 	)
 	if err != nil {
@@ -62,18 +65,23 @@ func (p *KafkaPublisher) Publish(ctx context.Context, msgs []Message) error {
 // Close flushes and disconnects.
 func (p *KafkaPublisher) Close() { p.cl.Close() }
 
-// KafkaConsumer reads Topic in a consumer group with manual commits: the
+// KafkaConsumer reads a topic in a consumer group with manual commits: the
 // dispatcher commits only after its database transaction commits.
 type KafkaConsumer struct{ cl *kgo.Client }
 
-// NewKafkaConsumer joins group.
-func NewKafkaConsumer(brokers []string, group string) (*KafkaConsumer, error) {
+// NewKafkaConsumer joins group on topic.
+func NewKafkaConsumer(brokers []string, topic, group string) (*KafkaConsumer, error) {
 	cl, err := kgo.NewClient(
 		kgo.SeedBrokers(brokers...),
 		kgo.ConsumerGroup(group),
-		kgo.ConsumeTopics(Topic),
+		kgo.ConsumeTopics(topic),
 		kgo.DisableAutoCommit(),
 		kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()),
+		// A crashed dispatcher holds its partitions until its session times
+		// out. Kafka's 45 s default would blow the 10 s recovery target; 6 s
+		// is Redpanda's minimum.
+		kgo.SessionTimeout(6*time.Second),
+		kgo.HeartbeatInterval(time.Second),
 	)
 	if err != nil {
 		return nil, err
