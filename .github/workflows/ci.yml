@@ -24,11 +24,23 @@ jobs:
           --health-retries 30
     env:
       KOSH_TEST_DATABASE_URL: postgres://kosh:kosh@localhost:5442/postgres?sslmode=disable
+      KOSH_KAFKA_BROKERS: localhost:19092
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - name: start redpanda
+        run: |
+          docker run -d --name redpanda -p 19092:19092 docker.redpanda.com/redpandadata/redpanda:v24.2.18 \
+            redpanda start --mode=dev-container --smp=1 \
+            --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092 \
+            --advertise-kafka-addr=internal://localhost:9092,external://localhost:19092
+          for i in $(seq 1 60); do
+            docker exec redpanda rpk cluster health | grep -qE 'Healthy:.+true' && exit 0
+            sleep 1
+          done
+          docker logs redpanda; exit 1
       - name: vet
         run: go vet ./...
       - name: test
