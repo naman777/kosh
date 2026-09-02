@@ -60,6 +60,6 @@ func (s *Service) GetOrder(ctx context.Context, merchantID, id uuid.UUID) (Order
 	if errors.Is(err, pgx.ErrNoRows) {
 		return OrderView{}, errorf(http.StatusNotFound, "not_found", "order %s not found", id)
 	}
-	o.CreatedAt = created
+	o.CreatedAt = created.UTC()
 	return o, err
 }

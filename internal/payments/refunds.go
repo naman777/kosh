@@ -58,7 +58,7 @@ func scanRefund(row pgx.Row) (Refund, error) {
 func (r Refund) View() RefundView {
 	return RefundView{ID: r.ID, Entity: "refund", PaymentID: r.PaymentID, Amount: int64(r.Amount),
 		Currency: "INR", State: r.State, BankRef: r.BankRef, FailureReason: r.FailureReason,
-		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt}
+		CreatedAt: r.CreatedAt.UTC(), UpdatedAt: r.UpdatedAt.UTC()}
 }
 
 const recoveryRefundCreated = "refund_created"

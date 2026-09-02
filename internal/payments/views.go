@@ -27,7 +27,7 @@ func (p Payment) View() PaymentView {
 		ID: p.ID, Entity: "payment", OrderID: p.OrderID,
 		Amount: int64(p.Amount), Refunded: int64(p.Refunded), Currency: "INR",
 		Method: p.Method, State: p.State, BankRef: p.BankRef, FailureReason: p.FailureReason,
-		CreatedAt: p.CreatedAt, UpdatedAt: p.UpdatedAt,
+		CreatedAt: p.CreatedAt.UTC(), UpdatedAt: p.UpdatedAt.UTC(),
 	}
 }
 
