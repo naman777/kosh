@@ -147,13 +147,71 @@ created → pending → authorized → captured → (partially_)refunded → ref
 - `docs/DESIGN.md` started, with the first ADRs: Postgres vs TigerBeetle, outbox vs CDC, pessimistic locking.
 - Invariants 1–8 pass in CI.
 
-## Phases 4–6 (after Gate 1, planned in detail later)
+## Phase 4 · Bank chaos and settlement (build plan week 4)
 
-- **Phase 4 · Bank chaos and settlement:** banksim v2 (late success, duplicate callbacks, outages), a pending-payment poller, auto-refund on late success after `failed`, T+1 settlement, two-phase payouts, settlement files with injected bad rows. Invariants 5 and 9 under every fault.
+Lessons from phases 1–3 that shape this one: every bank answer has to go through *one* function, because the same answer can now arrive three ways (the API's own call, a callback, the poller). And invariants that talk about time need to use the test's clock, not the database's `now()`.
+
+**Schema (`0004_settlement.sql`)**
+
+- `payments`, `refunds`: `next_poll_at` and `poll_attempts` for the pollers. `refunds.kind` is `merchant` or `auto`.
+- `payouts`: one row per merchant per settlement date (`UNIQUE (merchant_id, settlement_date)`), with a hold, a state (`pending → processed | failed`), a version and outbox events.
+- New system account `customer_refund_payable` (liability): money a late success owes back to a customer.
+- `outbox.aggregate_type` allows `payout`.
+
+**One resolver for bank answers (`applyBankResult`)**
+
+| Payment is | Bank says success | Bank says failed | Bank says pending / unknown |
+| --- | --- | --- | --- |
+| `created` / `pending` | → `authorized` | → `failed` | → `pending`, poll again |
+| `failed` | **late success**: record it, auto-refund | nothing | nothing |
+| `authorized` / `captured` / `refunded` | nothing (duplicate) | logged, nothing | nothing |
+
+A late success posts `late_success` (Dr `bank_receivable`, Cr `customer_refund_payable`), then an `auto` refund holds and posts the reverse once the bank confirms. The merchant gets `refund.created` / `refund.processed` events, and the payment stays `failed` but gains its `bank_ref`, so phase 5 recon can match the settlement line.
+
+The create-payment phase C, the bank callback endpoint, and the poller all call this resolver. Refunds and payouts get the same treatment.
+
+**Bank callbacks.** `POST /bank/callbacks` is signed with HMAC (`Bank-Signature`) and carries `{kind, id, status, bank_ref, reason}`. It is idempotent, so the bank can send it five times.
+
+**Pollers (`cmd/worker`)**
+
+- Payments in `created`/`pending` past `next_poll_at`: claim with a lease (`SKIP LOCKED`), ask `bank.Status`, resolve. Backoff from 5 s to 5 min. A payment still pending after 30 min is marked `failed` (`bank_timeout`); if the bank succeeds later, that is the late-success path.
+- `created` payments are first polled 2 min after creation, past the idempotency lease, so the poller only acts on requests that really died.
+- Refunds and payouts: the same loop. Holds are voided only by the expiry job, after the poller has had its chance.
+
+**T+1 settlement and payouts**
+
+- For settlement date D, each merchant's eligible amount is available balance (posted credits − posted debits − pending debits) minus credits posted on or after the start of D+1 IST. That nets out refunds and open holds, and leaves today's captures for tomorrow. A run that was skipped is covered by the next one.
+- The batch is idempotent through `UNIQUE (merchant_id, settlement_date)`. Each payout runs in phases like a payment: (A) hold Dr `merchant_payable` / Cr `payout_clearing` plus a payout row, (B) `bank.Payout`, (C) on success commit the hold and post Dr `payout_clearing` / Cr `bank_settlement`; on failure void the hold. A failed payout's money is picked up by the next day's batch.
+
+**Bank simulator v2**
+
+- Per-request answers with a `final_at` time: `pending` until then, final after. Callbacks are sent to Kosh after `callback_delay_ms`, `1..max_duplicate_callbacks` times.
+- `outage: true` returns 503 and records nothing.
+- `POST /v1/payouts`.
+- `GET /v1/settlements/{date}`: a CSV of the day's successful authorizations and refunds (`line_no, bank_ref, reference, gross, fee, tax, net, value_date`), with seeded fault injection (fee variance, missing, duplicate and amount-mismatch rows). `GET /admin/settlements/{date}/faults` returns the injected truth, so phase 5 can score recon accuracy.
+
+**Invariants**
+
+- 9 as SQL: no pending hold past its deadline (plus 10 min for the expiry job), no hold posted after its deadline, and every refund and payout hold matches its row's state.
+- `invariants.CheckAt(now)` passes the test's clock to SQL through `set_config('kosh.now', …)`. Tests on a fake clock stop depending on the real date.
+- 4, 6 and 7 extended for auto refunds and payouts.
+
+**Tests**
+
+- Banksim: dedupe, outage, pending → final, duplicate callbacks, deterministic settlement files.
+- Resolver table: every (state, answer) pair.
+- Late success: timeout → pending → marked failed at 30 min → success callback → auto refund processed. `customer_refund_payable` ends at zero.
+- A payment request crashes after insert, the poller fails it, and the client's retry gets a bank success: auto refund, no money lost.
+- 5 duplicate callbacks give one transition and one event.
+- Settlement: the eligible-amount math, a batch run twice gives one payout, payout failure restores the balance, and the next day's batch pays.
+- **Done-when test (`TestBankChaos`):** API + banksim (all faults on, callbacks to the API) + worker loops over HTTP, with many payments, refunds and settlements. Afterwards, invariants 1–9 hold.
+
+## Phases 5–6 (planned in detail later)
+
 - **Phase 5 · Reconciliation and simulation:** recon engine with six statuses, exception queue, a simulation harness with seed replay (`make sim SEED=…`), 200 seeds in CI and 10,000 locally. All 11 invariants.
 - **Phase 6 · Load, observability, launch:** k6 scenarios, Prometheus/Grafana, the Next.js failure lab, GCP deploy, README numbers, demo video.
 
-These get their own detailed section here once Gate 1 is done, using what phases 1–3 taught us.
+Each gets its own detailed section here when it starts.
 
 ## Working agreement
 
