@@ -22,6 +22,14 @@ const (
 	OutcomeTimeout
 	// OutcomeTimeoutFailed returns ErrUnknownOutcome and records Failed.
 	OutcomeTimeoutFailed
+	// OutcomePending answers Pending and stays pending until Settle.
+	OutcomePending
+	// OutcomeTimeoutPending returns ErrUnknownOutcome and stays pending
+	// until Settle: the slow-UPI case that ends in a late success.
+	OutcomeTimeoutPending
+	// OutcomeDown returns ErrUnknownOutcome and records nothing, like an
+	// outage: the bank never saw the request.
+	OutcomeDown
 )
 
 // Fake is an in-process bank for tests. It dedupes by id like a real bank:
@@ -32,7 +40,7 @@ type Fake struct {
 	def     Outcome
 	results map[uuid.UUID]Result
 	seq     atomic.Int64
-	// Calls counts Authorize and Refund calls, including repeats.
+	// Calls counts Authorize, Refund and Payout calls, including repeats.
 	Calls atomic.Int64
 }
 
@@ -53,11 +61,16 @@ func (f *Fake) SetDefault(o Outcome) {
 	f.def = o
 }
 
-// Settle records a final answer for id, as if the bank finished later.
-func (f *Fake) Settle(id uuid.UUID, r Result) {
+// Settle records a final answer for id, as if the bank finished later. A
+// Success without a BankRef gets one.
+func (f *Fake) Settle(id uuid.UUID, r Result) Result {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if r.Status == Success && r.BankRef == "" {
+		r.BankRef = fmt.Sprintf("LT%010d", f.seq.Add(1))
+	}
 	f.results[id] = r
+	return r
 }
 
 func (f *Fake) decide(id uuid.UUID, prefix string) (Result, error) {
@@ -82,6 +95,14 @@ func (f *Fake) decide(id uuid.UUID, prefix string) (Result, error) {
 	case OutcomeTimeoutFailed:
 		f.results[id] = Result{Status: Failed, Reason: "declined"}
 		return Result{}, ErrUnknownOutcome
+	case OutcomePending:
+		f.results[id] = Result{Status: Pending}
+		return f.results[id], nil
+	case OutcomeTimeoutPending:
+		f.results[id] = Result{Status: Pending}
+		return Result{}, ErrUnknownOutcome
+	case OutcomeDown:
+		return Result{}, ErrUnknownOutcome
 	default:
 		f.results[id] = Result{Status: Success, BankRef: ref}
 		return f.results[id], nil
@@ -98,6 +119,11 @@ func (f *Fake) Refund(_ context.Context, req RefundRequest) (Result, error) {
 	return f.decide(req.RefundID, "RF")
 }
 
+// Payout implements Client.
+func (f *Fake) Payout(_ context.Context, req PayoutRequest) (Result, error) {
+	return f.decide(req.PayoutID, "PO")
+}
+
 // Status implements Client.
 func (f *Fake) Status(_ context.Context, id uuid.UUID) (Result, error) {
 	f.mu.Lock()
@@ -105,5 +131,5 @@ func (f *Fake) Status(_ context.Context, id uuid.UUID) (Result, error) {
 	if r, ok := f.results[id]; ok {
 		return r, nil
 	}
-	return Result{Status: Failed, Reason: "unknown_id"}, nil
+	return Result{Status: Failed, Reason: ReasonUnknownID}, nil
 }

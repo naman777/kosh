@@ -54,10 +54,36 @@ type RefundRequest struct {
 	Amount         money.Paise `json:"amount"`
 }
 
+// PayoutRequest asks the bank to send money to a merchant's account.
+type PayoutRequest struct {
+	PayoutID    uuid.UUID   `json:"payout_id"`
+	Amount      money.Paise `json:"amount"`
+	Beneficiary uuid.UUID   `json:"beneficiary"` // the merchant
+}
+
 // Client talks to the bank.
 type Client interface {
 	Authorize(ctx context.Context, req AuthorizeRequest) (Result, error)
 	Refund(ctx context.Context, req RefundRequest) (Result, error)
-	// Status returns the latest answer for a payment or refund id.
+	Payout(ctx context.Context, req PayoutRequest) (Result, error)
+	// Status returns the latest answer for a payment, refund or payout id.
+	// An id the bank never saw answers Failed with reason "unknown_id".
 	Status(ctx context.Context, id uuid.UUID) (Result, error)
+}
+
+// ReasonUnknownID is the bank's answer for an id it never received.
+const ReasonUnknownID = "unknown_id"
+
+// Fee is what the bank charges Kosh on a payment: nothing on UPI (zero
+// MDR), 1% plus 18% GST on cards. Settlement files deduct it, and phase 5
+// reconciliation checks the deduction against this schedule.
+func Fee(method string, amount money.Paise) (fee, tax money.Paise) {
+	if method != "card" {
+		return 0, 0
+	}
+	b, err := money.Fees(amount, 100)
+	if err != nil {
+		return 0, 0
+	}
+	return b.Fee, b.GST
 }

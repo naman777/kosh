@@ -65,6 +65,11 @@ func (c *HTTPClient) Refund(ctx context.Context, req RefundRequest) (Result, err
 	return c.do(ctx, http.MethodPost, "/v1/refunds", req)
 }
 
+// Payout implements Client.
+func (c *HTTPClient) Payout(ctx context.Context, req PayoutRequest) (Result, error) {
+	return c.do(ctx, http.MethodPost, "/v1/payouts", req)
+}
+
 // Status implements Client.
 func (c *HTTPClient) Status(ctx context.Context, id uuid.UUID) (Result, error) {
 	return c.do(ctx, http.MethodGet, "/v1/status/"+id.String(), nil)
