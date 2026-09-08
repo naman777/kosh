@@ -1,5 +1,5 @@
 -- Every state change writes exactly one outbox event, in the same transaction.
--- A payment or refund at version N has events for versions 1..N and no others (the unique
+-- A payment, refund or payout at version N has events for versions 1..N and no others (the unique
 -- (aggregate_id, aggregate_version) key rules out duplicates), and its latest event names its current state.
 WITH aggregates AS (
   SELECT 'payment' AS kind, id, merchant_id, version, 'payment.' || state AS want_type FROM payments
@@ -7,6 +7,10 @@ WITH aggregates AS (
   SELECT 'refund', id, merchant_id, version,
          CASE WHEN version = 1 THEN 'refund.created' ELSE 'refund.' || state END
   FROM refunds
+  UNION ALL
+  SELECT 'payout', id, merchant_id, version,
+         CASE WHEN version = 1 THEN 'payout.created' ELSE 'payout.' || state END
+  FROM payouts
 ),
 events AS (
   SELECT aggregate_id, COUNT(*) AS n, MAX(aggregate_version) AS max_version

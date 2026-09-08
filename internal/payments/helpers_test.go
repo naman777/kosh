@@ -166,7 +166,7 @@ func (e *env) count(table string) int {
 
 func (e *env) checkInvariants() {
 	e.t.Helper()
-	rep, err := invariants.Check(e.ctx, e.pool)
+	rep, err := invariants.CheckAt(e.ctx, e.pool, e.clk.Now())
 	if err != nil {
 		e.t.Fatal(err)
 	}

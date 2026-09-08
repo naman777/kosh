@@ -73,7 +73,7 @@ func (f *fixture) account(t *testing.T, id ledger.AccountID) ledger.Account {
 // (3–6) need payment rows these tests don't create.
 func (f *fixture) checkInvariants(t *testing.T) {
 	t.Helper()
-	rep, err := invariants.Check(context.Background(), f.pool, 1, 2, 5, 11)
+	rep, err := invariants.CheckAt(context.Background(), f.pool, f.clk.Now(), 1, 2, 5, 9, 11)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,6 +251,15 @@ func TestHoldExpiry(t *testing.T) {
 	}
 
 	f.clk.Advance(2 * time.Minute)
+	// Invariant 9 tolerates 10 minutes for the expiry job; past that, an
+	// unexpired hold is a violation.
+	rep, err := invariants.CheckAt(ctx, f.pool, f.clk.Now().Add(15*time.Minute), 9)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.OK() {
+		t.Fatal("invariant 9 missed a hold left pending past its deadline")
+	}
 	if err := f.tx(t, func(tx pgx.Tx) error { return f.l.CommitHold(ctx, tx, id) }); !errors.Is(err, ledger.ErrHoldExpired) {
 		t.Fatalf("commit after deadline: %v", err)
 	}

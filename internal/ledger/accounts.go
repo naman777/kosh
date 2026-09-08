@@ -23,6 +23,9 @@ const (
 	// PayoutClearing (liability) holds merchant money between payout
 	// initiation and bank confirmation.
 	PayoutClearing = "payout_clearing"
+	// CustomerRefundPayable (liability) is money Kosh owes customers whose
+	// payment succeeded at the bank after Kosh had marked it failed.
+	CustomerRefundPayable = "customer_refund_payable"
 	// MerchantPayable (liability) is what Kosh owes a merchant. It may never
 	// go negative, counting holds.
 	MerchantPayable = "merchant_payable"
@@ -43,6 +46,7 @@ var SystemAccounts = []AccountSpec{
 	{Code: FeeRevenue, Normal: NormalCredit},
 	{Code: GSTPayable, Normal: NormalCredit},
 	{Code: PayoutClearing, Normal: NormalCredit},
+	{Code: CustomerRefundPayable, Normal: NormalCredit, Flags: DebitsMustNotExceedCredits},
 }
 
 // MerchantPayableSpec is the per-merchant payable account.

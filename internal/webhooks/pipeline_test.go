@@ -161,7 +161,7 @@ func (p *pipe) events() int {
 
 func (p *pipe) checkInvariants() {
 	p.t.Helper()
-	rep, err := invariants.Check(p.ctx, p.pool)
+	rep, err := invariants.CheckAt(p.ctx, p.pool, p.clk.Now())
 	if err != nil {
 		p.t.Fatal(err)
 	}
@@ -250,7 +250,7 @@ func TestDispatcherCrashAfterSend(t *testing.T) {
 		t.Fatalf("merchant should already have everything: %+v", s)
 	}
 	// Invariant 8 is violated until the retry: the merchant has them, we don't know it.
-	rep, _ := invariants.Check(p.ctx, p.pool, 8)
+	rep, _ := invariants.CheckAt(p.ctx, p.pool, p.clk.Now(), 8)
 	if rep.OK() {
 		t.Fatal("invariant 8 should flag the unrecorded deliveries before recovery")
 	}

@@ -15,6 +15,7 @@ UNION ALL
 SELECT 'refund_key_count', r.id::text, format('keys=%s', COUNT(k.key))
 FROM refunds r
 LEFT JOIN idempotency_keys k ON k.resource_id = r.id AND k.request_path LIKE '/v1/payments/%/refunds'
+WHERE r.kind = 'merchant'
 GROUP BY r.id
 HAVING COUNT(k.key) <> 1
 UNION ALL
@@ -23,4 +24,5 @@ FROM idempotency_keys k
 WHERE k.resource_id IS NOT NULL
   AND NOT EXISTS (SELECT 1 FROM payments WHERE id = k.resource_id)
   AND NOT EXISTS (SELECT 1 FROM refunds WHERE id = k.resource_id)
+  AND NOT EXISTS (SELECT 1 FROM payouts WHERE id = k.resource_id)
   AND NOT EXISTS (SELECT 1 FROM orders WHERE id = k.resource_id);

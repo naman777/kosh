@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -130,6 +131,26 @@ func All() ([]Invariant, error) {
 // Querier is satisfied by *pgxpool.Pool, *pgx.Conn and pgx.Tx.
 type Querier interface {
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+}
+
+// Beginner starts transactions (*pgxpool.Pool, *pgx.Conn).
+type Beginner interface {
+	Begin(ctx context.Context) (pgx.Tx, error)
+}
+
+// CheckAt is Check with "now" fixed to now, for tests on a fake clock.
+// Time-based rules (invariant 9's deadlines) read it from the kosh.now
+// setting, which is scoped to one read-only transaction.
+func CheckAt(ctx context.Context, db Beginner, now time.Time, ids ...int) (Report, error) {
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return Report{}, err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	if _, err := tx.Exec(ctx, `SELECT set_config('kosh.now', $1, true)`, now.UTC().Format(time.RFC3339Nano)); err != nil {
+		return Report{}, err
+	}
+	return Check(ctx, tx, ids...)
 }
 
 // Check runs the given invariants (all of them when ids is empty).
