@@ -76,10 +76,9 @@ func (s *Service) CreatePayment(ctx context.Context, k idempotency.Key) (Respons
 		crash.Point("payments.create.after_bank")
 
 		return s.finish(ctx, rec, http.StatusCreated, func(tx pgx.Tx) (any, error) {
-			p, err := s.applyAuthorization(ctx, tx, p.ID, StateCreated, res)
-			if errors.Is(err, errStale) {
-				p, err = s.getPayment(ctx, tx, k.MerchantID, rec.ResourceID.UUID, false)
-			}
+			// The poller or a callback may have got here first; the resolver
+			// handles every state, including a late success after failed.
+			p, err := s.applyPaymentResult(ctx, tx, p.ID, res)
 			return p.View(), err
 		})
 	})
@@ -95,11 +94,12 @@ func (s *Service) insertPayment(ctx context.Context, tx pgx.Tx, merchantID uuid.
 	if err != nil {
 		return uuid.Nil, err
 	}
+	now := s.clock.Now()
 	p, err := scanPayment(tx.QueryRow(ctx, `
-		INSERT INTO payments (id, merchant_id, order_id, amount, method, state, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, 'created', $6, $6)
+		INSERT INTO payments (id, merchant_id, order_id, amount, method, state, created_at, updated_at, next_poll_at)
+		VALUES ($1, $2, $3, $4, $5, 'created', $6, $6, $7)
 		RETURNING `+paymentCols,
-		s.ids.New(), merchantID, in.OrderID, amount, in.Method, s.clock.Now()))
+		s.ids.New(), merchantID, in.OrderID, amount, in.Method, now, now.Add(s.cfg.CreatedGrace)))
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.ConstraintName == "payments_one_live_per_order" {
 		return uuid.Nil, errorf(http.StatusConflict, "order_already_has_payment",
@@ -109,27 +109,6 @@ func (s *Service) insertPayment(ctx context.Context, tx pgx.Tx, merchantID uuid.
 		return uuid.Nil, err
 	}
 	return p.ID, s.emitPayment(ctx, tx, p)
-}
-
-// applyAuthorization moves a payment out of from according to the bank's answer.
-func (s *Service) applyAuthorization(ctx context.Context, tx pgx.Tx, id uuid.UUID, from State, res bank.Result) (Payment, error) {
-	switch res.Status {
-	case bank.Success:
-		ref := res.BankRef
-		return s.transition(ctx, tx, id, from, StateAuthorized, change{bankRef: &ref})
-	case bank.Failed:
-		reason := res.Reason
-		if reason == "" {
-			reason = "declined"
-		}
-		return s.transition(ctx, tx, id, from, StateFailed, change{failureReason: &reason})
-	default:
-		if from == StatePending {
-			// Still no final answer: nothing changes.
-			return scanPayment(tx.QueryRow(ctx, `SELECT `+paymentCols+` FROM payments WHERE id = $1`, id))
-		}
-		return s.transition(ctx, tx, id, from, StatePending, change{})
-	}
 }
 
 // Capture posts the capture entry: the bank owes Kosh the full amount, and

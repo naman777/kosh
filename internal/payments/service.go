@@ -32,11 +32,50 @@ type Config struct {
 	BankTimeout time.Duration
 	// RefundHoldTTL is how long a refund's hold may stay pending.
 	RefundHoldTTL time.Duration
+	// PayoutHoldTTL is how long a payout's hold may stay pending.
+	PayoutHoldTTL time.Duration
+
+	// PollBase and PollMax bound the status pollers' backoff.
+	PollBase, PollMax time.Duration
+	// CreatedGrace is how long a request may sit between its first phase
+	// and its bank call before the poller treats it as abandoned. It must
+	// exceed the idempotency lease plus BankTimeout.
+	CreatedGrace time.Duration
+	// PendingTimeout is how long a payment may stay pending at the bank
+	// before Kosh marks it failed. A later success becomes an auto refund.
+	PendingTimeout time.Duration
+	// RefundPendingTimeout is the same for refunds and payouts. It must be
+	// shorter than their hold TTLs, so the poller decides before expiry does.
+	RefundPendingTimeout time.Duration
 }
 
 // DefaultConfig matches the build plan: a 30 s bank timeout.
 func DefaultConfig() Config {
-	return Config{BankTimeout: 30 * time.Second, RefundHoldTTL: 72 * time.Hour}
+	return Config{
+		BankTimeout:   30 * time.Second,
+		RefundHoldTTL: 72 * time.Hour, PayoutHoldTTL: 72 * time.Hour,
+		PollBase: 5 * time.Second, PollMax: 5 * time.Minute,
+		CreatedGrace: 2 * time.Minute, PendingTimeout: 30 * time.Minute, RefundPendingTimeout: 24 * time.Hour,
+	}
+}
+
+// withDefaults fills zero fields from DefaultConfig.
+func (c Config) withDefaults() Config {
+	d := DefaultConfig()
+	set := func(v *time.Duration, def time.Duration) {
+		if *v == 0 {
+			*v = def
+		}
+	}
+	set(&c.BankTimeout, d.BankTimeout)
+	set(&c.RefundHoldTTL, d.RefundHoldTTL)
+	set(&c.PayoutHoldTTL, d.PayoutHoldTTL)
+	set(&c.PollBase, d.PollBase)
+	set(&c.PollMax, d.PollMax)
+	set(&c.CreatedGrace, d.CreatedGrace)
+	set(&c.PendingTimeout, d.PendingTimeout)
+	set(&c.RefundPendingTimeout, d.RefundPendingTimeout)
+	return c
 }
 
 // Deps are the service's collaborators. Tests and the simulation harness
@@ -69,9 +108,7 @@ func New(ctx context.Context, d Deps) (*Service, error) {
 	if d.IDs == nil {
 		d.IDs = ids.Random{}
 	}
-	if d.Config == (Config{}) {
-		d.Config = DefaultConfig()
-	}
+	d.Config = d.Config.withDefaults()
 	l := ledger.New(d.Clock)
 	sys, err := l.EnsureSystemAccounts(ctx, d.Pool)
 	if err != nil {

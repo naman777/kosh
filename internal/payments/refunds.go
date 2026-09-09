@@ -36,6 +36,7 @@ type Refund struct {
 	ID            uuid.UUID
 	PaymentID     uuid.UUID
 	MerchantID    uuid.UUID
+	Kind          string // merchant | auto
 	Amount        money.Paise
 	State         string
 	HoldEntryID   uuid.UUID
@@ -46,11 +47,17 @@ type Refund struct {
 	UpdatedAt     time.Time
 }
 
-const refundCols = `id, payment_id, merchant_id, amount, state, hold_entry_id, bank_ref, failure_reason, version, created_at, updated_at`
+// Refund kinds.
+const (
+	RefundKindMerchant = "merchant" // requested by the merchant, held on merchant_payable
+	RefundKindAuto     = "auto"     // Kosh returning a late success, held on customer_refund_payable
+)
+
+const refundCols = `id, payment_id, merchant_id, kind, amount, state, hold_entry_id, bank_ref, failure_reason, version, created_at, updated_at`
 
 func scanRefund(row pgx.Row) (Refund, error) {
 	var r Refund
-	err := row.Scan(&r.ID, &r.PaymentID, &r.MerchantID, &r.Amount, &r.State, &r.HoldEntryID,
+	err := row.Scan(&r.ID, &r.PaymentID, &r.MerchantID, &r.Kind, &r.Amount, &r.State, &r.HoldEntryID,
 		&r.BankRef, &r.FailureReason, &r.Version, &r.CreatedAt, &r.UpdatedAt)
 	return r, err
 }
@@ -168,10 +175,10 @@ func (s *Service) reserveRefund(ctx context.Context, tx pgx.Tx, merchantID, paym
 		return uuid.Nil, err
 	}
 	r, err := scanRefund(tx.QueryRow(ctx, `
-		INSERT INTO refunds (id, payment_id, merchant_id, amount, state, hold_entry_id, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, 'pending', $5, $6, $6)
+		INSERT INTO refunds (id, payment_id, merchant_id, amount, state, hold_entry_id, created_at, updated_at, next_poll_at)
+		VALUES ($1, $2, $3, $4, 'pending', $5, $6, $6, $7)
 		RETURNING `+refundCols,
-		refundID, paymentID, merchantID, reserved, holdID, now))
+		refundID, paymentID, merchantID, reserved, holdID, now, now.Add(s.cfg.CreatedGrace)))
 	if err != nil {
 		return uuid.Nil, err
 	}
@@ -228,10 +235,14 @@ func (s *Service) resolveRefund(ctx context.Context, tx pgx.Tx, refundID uuid.UU
 		if err != nil {
 			return Refund{}, err
 		}
+		if r.Kind == RefundKindAuto {
+			return r, nil
+		}
 		// Fully refunded once processed refunds cover the whole amount.
 		var full bool
 		if err := tx.QueryRow(ctx, `
-			SELECT p.amount = (SELECT COALESCE(SUM(amount), 0) FROM refunds WHERE payment_id = p.id AND state = 'processed')
+			SELECT p.amount = (SELECT COALESCE(SUM(amount), 0) FROM refunds
+			                   WHERE payment_id = p.id AND kind = 'merchant' AND state = 'processed')
 			FROM payments p WHERE p.id = $1`, r.PaymentID).Scan(&full); err != nil {
 			return Refund{}, err
 		}
@@ -255,12 +266,16 @@ func (s *Service) resolveRefund(ctx context.Context, tx pgx.Tx, refundID uuid.UU
 	}
 }
 
-// failRefund marks a refund failed and gives the amount back to the payment.
-// The caller has already voided (or expired) the hold.
+// failRefund marks a refund failed and, for a merchant refund, gives the
+// amount back to the payment. The caller has already voided (or expired)
+// the hold. A failed auto refund leaves its credit in
+// customer_refund_payable, where reconciliation (phase 5) surfaces it.
 func (s *Service) failRefund(ctx context.Context, tx pgx.Tx, r Refund, reason string) (Refund, error) {
-	if _, err := tx.Exec(ctx, `UPDATE payments SET refunded = refunded - $2, updated_at = $3 WHERE id = $1`,
-		r.PaymentID, int64(r.Amount), s.clock.Now()); err != nil {
-		return Refund{}, err
+	if r.Kind == RefundKindMerchant {
+		if _, err := tx.Exec(ctx, `UPDATE payments SET refunded = refunded - $2, updated_at = $3 WHERE id = $1`,
+			r.PaymentID, int64(r.Amount), s.clock.Now()); err != nil {
+			return Refund{}, err
+		}
 	}
 	return s.setRefundState(ctx, tx, r.ID, RefundFailed, nil, &reason)
 }
@@ -269,7 +284,8 @@ func (s *Service) setRefundState(ctx context.Context, tx pgx.Tx, id uuid.UUID, s
 	r, err := scanRefund(tx.QueryRow(ctx, `
 		UPDATE refunds
 		SET state = $2, version = version + 1, updated_at = $3,
-		    bank_ref = COALESCE($4, bank_ref), failure_reason = COALESCE($5, failure_reason)
+		    bank_ref = COALESCE($4, bank_ref), failure_reason = COALESCE($5, failure_reason),
+		    next_poll_at = NULL
 		WHERE id = $1 AND state = 'pending'
 		RETURNING `+refundCols, id, state, s.clock.Now(), bankRef, reason))
 	if err != nil {
@@ -278,9 +294,11 @@ func (s *Service) setRefundState(ctx context.Context, tx pgx.Tx, id uuid.UUID, s
 	return r, s.emitRefund(ctx, tx, r)
 }
 
-// ExpireRefundHolds voids refund holds past their deadline and fails their
-// refunds. It returns how many refunds it failed.
-func (s *Service) ExpireRefundHolds(ctx context.Context, limit int) (int, error) {
+// ExpireHolds voids refund and payout holds past their deadline and fails
+// what placed them. It is the backstop behind the pollers, which normally
+// resolve everything well before a hold expires. It returns how many
+// refunds and payouts it failed.
+func (s *Service) ExpireHolds(ctx context.Context, limit int) (int, error) {
 	n := 0
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		expired, err := s.ledger.ExpireHolds(ctx, tx, limit)
@@ -288,18 +306,25 @@ func (s *Service) ExpireRefundHolds(ctx context.Context, limit int) (int, error)
 			return err
 		}
 		for _, h := range expired {
-			if h.Kind != "refund" {
+			switch h.Kind {
+			case "refund":
+				r, err := scanRefund(tx.QueryRow(ctx, `SELECT `+refundCols+` FROM refunds WHERE id = $1 FOR UPDATE`, h.RefID))
+				if err != nil {
+					return err
+				}
+				if r.State != RefundPending {
+					continue
+				}
+				if _, err := s.failRefund(ctx, tx, r, "hold_expired"); err != nil {
+					return err
+				}
+			case "payout":
+				reason := "hold_expired"
+				if _, err := s.setPayoutState(ctx, tx, h.RefID, PayoutFailed, nil, &reason); err != nil {
+					return err
+				}
+			default:
 				continue
-			}
-			r, err := scanRefund(tx.QueryRow(ctx, `SELECT `+refundCols+` FROM refunds WHERE id = $1 FOR UPDATE`, h.RefID))
-			if err != nil {
-				return err
-			}
-			if r.State != RefundPending {
-				continue
-			}
-			if _, err := s.failRefund(ctx, tx, r, "hold_expired"); err != nil {
-				return err
 			}
 			n++
 		}

@@ -89,14 +89,23 @@ func (s *Service) transition(ctx context.Context, tx pgx.Tx, id uuid.UUID, from,
 	if !CanTransition(from, to) {
 		return Payment{}, fmt.Errorf("%w: %s → %s", ErrIllegalTransition, from, to)
 	}
+	// Entering pending schedules the status poller; leaving the unresolved
+	// states unschedules it.
+	now := s.clock.Now()
+	var nextPoll *time.Time
+	if to == StatePending {
+		t := now.Add(s.cfg.PollBase)
+		nextPoll = &t
+	}
 	p, err := scanPayment(tx.QueryRow(ctx, `
 		UPDATE payments
 		SET state = $3, version = version + 1, updated_at = $4,
 		    bank_ref = COALESCE($5, bank_ref),
-		    failure_reason = COALESCE($6, failure_reason)
+		    failure_reason = COALESCE($6, failure_reason),
+		    next_poll_at = $7
 		WHERE id = $1 AND state = $2
 		RETURNING `+paymentCols,
-		id, from, to, s.clock.Now(), c.bankRef, c.failureReason))
+		id, from, to, now, c.bankRef, c.failureReason, nextPoll))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Payment{}, errStale
 	}

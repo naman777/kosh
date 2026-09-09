@@ -377,13 +377,13 @@ func TestRefundHoldExpires(t *testing.T) {
 	if r.State != payments.RefundPending {
 		t.Fatalf("refund %+v", r)
 	}
-	if n, err := e.svc.ExpireRefundHolds(e.ctx, 10); err != nil || n != 0 {
+	if n, err := e.svc.ExpireHolds(e.ctx, 10); err != nil || n != 0 {
 		t.Fatalf("expired early: %d %v", n, err)
 	}
 	e.checkInvariants()
 
 	e.clk.Advance(73 * time.Hour)
-	if n, err := e.svc.ExpireRefundHolds(e.ctx, 10); err != nil || n != 1 {
+	if n, err := e.svc.ExpireHolds(e.ctx, 10); err != nil || n != 1 {
 		t.Fatalf("expire: %d %v", n, err)
 	}
 	got, _ := e.svc.GetRefund(e.ctx, e.m, r.ID)
