@@ -368,33 +368,51 @@ func TestRefundDeclinedByBank(t *testing.T) {
 	e.checkInvariants()
 }
 
+// TestRefundHoldExpires: a refund the bank never decides is given up when
+// its hold expires; one the bank did complete is committed, not released,
+// even though the confirmation is late.
 func TestRefundHoldExpires(t *testing.T) {
-	e := newEnv(t)
-	e.captured(money.Rupees(1000))
-	p := e.captured(money.Rupees(1000))
-	e.bank.Next(bank.OutcomeTimeout)
-	r := mustDecode[payments.RefundView](t, e.refund(p.ID, 40_000), 201)
-	if r.State != payments.RefundPending {
-		t.Fatalf("refund %+v", r)
-	}
-	if n, err := e.svc.ExpireHolds(e.ctx, 10); err != nil || n != 0 {
-		t.Fatalf("expired early: %d %v", n, err)
-	}
-	e.checkInvariants()
+	for _, tc := range []struct {
+		name    string
+		outcome bank.Outcome
+		want    string
+	}{
+		{"bank still pending", bank.OutcomeTimeoutPending, payments.RefundFailed},
+		{"bank already paid", bank.OutcomeTimeout, payments.RefundProcessed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEnv(t)
+			e.captured(money.Rupees(1000))
+			p := e.captured(money.Rupees(1000))
+			e.bank.Next(tc.outcome)
+			r := mustDecode[payments.RefundView](t, e.refund(p.ID, 40_000), 201)
+			if r.State != payments.RefundPending {
+				t.Fatalf("refund %+v", r)
+			}
+			if n, err := e.svc.ExpireHolds(e.ctx, 10); err != nil || n != 0 {
+				t.Fatalf("expired early: %d %v", n, err)
+			}
+			e.checkInvariants()
 
-	e.clk.Advance(73 * time.Hour)
-	if n, err := e.svc.ExpireHolds(e.ctx, 10); err != nil || n != 1 {
-		t.Fatalf("expire: %d %v", n, err)
+			e.clk.Advance(73 * time.Hour)
+			if n, err := e.svc.ExpireHolds(e.ctx, 10); err != nil || n != 1 {
+				t.Fatalf("expire: %d %v", n, err)
+			}
+			got, _ := e.svc.GetRefund(e.ctx, e.m, r.ID)
+			if got.State != tc.want {
+				t.Fatalf("refund after expiry %+v, want %s", got, tc.want)
+			}
+			pay, _ := e.svc.GetPayment(e.ctx, e.m, p.ID)
+			wantRefunded := int64(0)
+			if tc.want == payments.RefundProcessed {
+				wantRefunded = 40_000
+			}
+			if pay.Refunded != wantRefunded {
+				t.Fatalf("refunded %d, want %d", pay.Refunded, wantRefunded)
+			}
+			e.checkInvariants()
+		})
 	}
-	got, _ := e.svc.GetRefund(e.ctx, e.m, r.ID)
-	if got.State != payments.RefundFailed {
-		t.Fatalf("refund after expiry %+v", got)
-	}
-	pay, _ := e.svc.GetPayment(e.ctx, e.m, p.ID)
-	if pay.Refunded != 0 {
-		t.Fatalf("refunded %d after expiry", pay.Refunded)
-	}
-	e.checkInvariants()
 }
 
 func TestZeroFeeMerchant(t *testing.T) {

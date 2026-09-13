@@ -281,6 +281,29 @@ func TestHoldExpiry(t *testing.T) {
 	if s, _ := f.l.EntryState(ctx, f.pool, id); s != ledger.StateVoided {
 		t.Fatalf("state %q", s)
 	}
+	// A bank-confirmed commit lands even after the deadline, as long as
+	// the hold was not voided yet.
+	late := uuid.New()
+	if err := f.post(t, dr(recv, 300), cr(m, 300)); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.tx(t, func(tx pgx.Tx) error {
+		return f.l.Hold(ctx, tx, ledger.Entry{ID: late, Kind: "payout", RefID: uuid.New(), Postings: []ledger.Posting{
+			dr(m, 300), cr(f.sys[ledger.PayoutClearing], 300),
+		}}, f.clk.Now().Add(time.Minute))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	f.clk.Advance(5 * time.Minute)
+	if err := f.tx(t, func(tx pgx.Tx) error { return f.l.CommitHold(ctx, tx, late) }); !errors.Is(err, ledger.ErrHoldExpired) {
+		t.Fatalf("unconfirmed commit after deadline: %v", err)
+	}
+	if err := f.tx(t, func(tx pgx.Tx) error { return f.l.CommitConfirmed(ctx, tx, late) }); err != nil {
+		t.Fatalf("confirmed commit after deadline: %v", err)
+	}
+	if err := f.tx(t, func(tx pgx.Tx) error { return f.l.CommitConfirmed(ctx, tx, id) }); !errors.Is(err, ledger.ErrHoldResolved) {
+		t.Fatalf("confirmed commit of a voided hold: %v", err)
+	}
 	if err := f.tx(t, func(tx pgx.Tx) error { return f.l.Hold(ctx, tx, ledger.Entry{}, f.clk.Now()) }); !errors.Is(err, ledger.ErrBadExpiry) {
 		t.Fatalf("hold with past deadline: %v", err)
 	}

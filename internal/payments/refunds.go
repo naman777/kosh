@@ -227,7 +227,7 @@ func (s *Service) resolveRefund(ctx context.Context, tx pgx.Tx, refundID uuid.UU
 	}
 	switch res.Status {
 	case bank.Success:
-		if err := s.ledger.CommitHold(ctx, tx, r.HoldEntryID); err != nil {
+		if err := s.ledger.CommitConfirmed(ctx, tx, r.HoldEntryID); err != nil {
 			return Refund{}, fmt.Errorf("payments: commit refund hold: %w", err)
 		}
 		ref := res.BankRef
@@ -294,43 +294,66 @@ func (s *Service) setRefundState(ctx context.Context, tx pgx.Tx, id uuid.UUID, s
 	return r, s.emitRefund(ctx, tx, r)
 }
 
-// ExpireHolds voids refund and payout holds past their deadline and fails
-// what placed them. It is the backstop behind the pollers, which normally
-// resolve everything well before a hold expires. It returns how many
-// refunds and payouts it failed.
+// ExpireHolds deals with refund and payout holds past their deadline. It is
+// the backstop behind the pollers, which normally resolve everything long
+// before. It never voids blindly: it asks the bank first, because a hold
+// whose money already moved must be committed, not released. Only an
+// answer of failed, never-received or still-pending gives the hold up.
+// It returns how many holds it resolved.
 func (s *Service) ExpireHolds(ctx context.Context, limit int) (int, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT kind, ref_id FROM journal_entries
+		WHERE state = 'pending' AND expires_at <= $1
+		ORDER BY expires_at
+		LIMIT $2`, s.clock.Now(), limit)
+	if err != nil {
+		return 0, err
+	}
+	type held struct {
+		kind string
+		ref  uuid.UUID
+	}
+	var due []held
+	for rows.Next() {
+		var h held
+		if err := rows.Scan(&h.kind, &h.ref); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		due = append(due, h)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+
 	n := 0
-	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		expired, err := s.ledger.ExpireHolds(ctx, tx, limit)
+	for _, h := range due {
+		res, err := s.bankStatus(ctx, h.ref)
 		if err != nil {
-			return err
+			continue // bank unreachable: try again next round
 		}
-		for _, h := range expired {
-			switch h.Kind {
+		if res.Status != bank.Success {
+			res = bank.Result{Status: bank.Failed, Reason: "hold_expired"}
+		}
+		err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+			var err error
+			switch h.kind {
 			case "refund":
-				r, err := scanRefund(tx.QueryRow(ctx, `SELECT `+refundCols+` FROM refunds WHERE id = $1 FOR UPDATE`, h.RefID))
-				if err != nil {
-					return err
-				}
-				if r.State != RefundPending {
-					continue
-				}
-				if _, err := s.failRefund(ctx, tx, r, "hold_expired"); err != nil {
-					return err
-				}
+				_, err = s.resolveRefund(ctx, tx, h.ref, res)
 			case "payout":
-				reason := "hold_expired"
-				if _, err := s.setPayoutState(ctx, tx, h.RefID, PayoutFailed, nil, &reason); err != nil {
-					return err
-				}
+				_, err = s.resolvePayout(ctx, tx, h.ref, res)
 			default:
-				continue
+				return fmt.Errorf("payments: expired hold of unknown kind %q", h.kind)
 			}
-			n++
+			return err
+		})
+		if err != nil {
+			return n, err
 		}
-		return nil
-	})
-	return n, err
+		n++
+	}
+	return n, nil
 }
 
 // GetRefund reads one of a merchant's refunds.

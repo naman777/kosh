@@ -147,14 +147,32 @@ func deltaArrays(deltas map[AccountID]delta) (ids, drs, crs []int64) {
 // fails with ErrHoldResolved if the hold was already posted or voided, and
 // ErrHoldExpired if its deadline has passed.
 func (l *Ledger) CommitHold(ctx context.Context, tx pgx.Tx, entryID uuid.UUID) error {
+	return l.commit(ctx, tx, entryID, true)
+}
+
+// CommitConfirmed posts a pending hold even after its deadline. Use it when
+// an outside party (the bank) confirms the money has moved: that is a fact
+// the ledger must record, and the deadline only says when an unconfirmed
+// hold may be given up. A hold already voided still fails, with
+// ErrHoldResolved.
+func (l *Ledger) CommitConfirmed(ctx context.Context, tx pgx.Tx, entryID uuid.UUID) error {
+	return l.commit(ctx, tx, entryID, false)
+}
+
+func (l *Ledger) commit(ctx context.Context, tx pgx.Tx, entryID uuid.UUID, checkDeadline bool) error {
 	now := l.clock.Now()
-	tag, err := tx.Exec(ctx, `
-		UPDATE journal_entries SET state = 'posted', resolved_at = $2
-		WHERE id = $1 AND state = 'pending' AND expires_at > $2`, entryID, now)
+	sql := `UPDATE journal_entries SET state = 'posted', resolved_at = $2 WHERE id = $1 AND state = 'pending'`
+	if checkDeadline {
+		sql += ` AND expires_at > $2`
+	}
+	tag, err := tx.Exec(ctx, sql, entryID, now)
 	if err != nil {
 		return fmt.Errorf("ledger: commit hold: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
+		if !checkDeadline {
+			now = time.Time{}
+		}
 		return l.whyNotResolvable(ctx, tx, entryID, now)
 	}
 	return l.releaseHold(ctx, tx, entryID, true)
