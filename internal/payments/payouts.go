@@ -111,10 +111,12 @@ func (s *Service) RunSettlement(ctx context.Context, date time.Time) (Settlement
 		return rep, ErrTooEarly
 	}
 
+	// Dates go to Postgres as text: a time.Time would be compared as a UTC
+	// timestamp, and IST midnight is 18:30 the previous day in UTC.
 	rows, err := s.pool.Query(ctx, `
 		SELECT m.id FROM merchants m
-		WHERE NOT EXISTS (SELECT 1 FROM payouts p WHERE p.merchant_id = m.id AND p.settlement_date = $1)
-		ORDER BY m.id`, day)
+		WHERE NOT EXISTS (SELECT 1 FROM payouts p WHERE p.merchant_id = m.id AND p.settlement_date = $1::date)
+		ORDER BY m.id`, rep.Date)
 	if err != nil {
 		return rep, err
 	}
@@ -134,7 +136,7 @@ func (s *Service) RunSettlement(ctx context.Context, date time.Time) (Settlement
 
 	for _, m := range merchants {
 		rep.Merchants++
-		p, ok, err := s.createPayout(ctx, m, day, cutoff)
+		p, ok, err := s.createPayout(ctx, m, rep.Date, cutoff)
 		if err != nil {
 			return rep, err
 		}
@@ -153,7 +155,7 @@ func (s *Service) RunSettlement(ctx context.Context, date time.Time) (Settlement
 
 // createPayout is phase A: compute what is eligible, hold it, and record
 // the payout, in one transaction.
-func (s *Service) createPayout(ctx context.Context, merchantID uuid.UUID, day, cutoff time.Time) (Payout, bool, error) {
+func (s *Service) createPayout(ctx context.Context, merchantID uuid.UUID, day string, cutoff time.Time) (Payout, bool, error) {
 	var (
 		p  Payout
 		ok bool
@@ -163,7 +165,16 @@ func (s *Service) createPayout(ctx context.Context, merchantID uuid.UUID, day, c
 		if err != nil {
 			return err
 		}
-		// Lock the payable first so the eligible amount can't move under us.
+		// Lock the payable, then compute in a *separate* statement. Under READ
+		// COMMITTED a SELECT … FOR UPDATE that waits on a lock re-reads the
+		// row's new balance but evaluates its subqueries against its old
+		// snapshot, so a capture committing meanwhile would be counted in the
+		// balance and missed by "credits since cutoff". Once we hold the lock
+		// no posting to this account is in flight, and the next statement's
+		// fresh snapshot sees everything. (Caught by TestBankChaos.)
+		if _, err := tx.Exec(ctx, `SELECT 1 FROM accounts WHERE id = $1 FOR UPDATE`, payable); err != nil {
+			return err
+		}
 		var eligible money.Paise
 		if err := tx.QueryRow(ctx, `
 			SELECT a.posted_cr - a.posted_dr - a.pending_dr
@@ -171,8 +182,7 @@ func (s *Service) createPayout(ctx context.Context, merchantID uuid.UUID, day, c
 			                 JOIN journal_entries e ON e.id = ps.entry_id
 			                 WHERE ps.account_id = a.id AND ps.side = 'cr'
 			                   AND e.state = 'posted' AND e.created_at >= $2), 0)
-			FROM accounts a WHERE a.id = $1
-			FOR UPDATE`, payable, cutoff).Scan(&eligible); err != nil {
+			FROM accounts a WHERE a.id = $1`, payable, cutoff).Scan(&eligible); err != nil {
 			return err
 		}
 		if eligible < MinPayout {
@@ -188,7 +198,7 @@ func (s *Service) createPayout(ctx context.Context, merchantID uuid.UUID, day, c
 		}
 		p, err = scanPayout(tx.QueryRow(ctx, `
 			INSERT INTO payouts (id, merchant_id, settlement_date, amount, state, hold_entry_id, created_at, updated_at, next_poll_at)
-			VALUES ($1, $2, $3, $4, 'pending', $5, $6, $6, $7)
+			VALUES ($1, $2, $3::date, $4, 'pending', $5, $6, $6, $7)
 			ON CONFLICT (merchant_id, settlement_date) DO NOTHING
 			RETURNING `+payoutCols, id, merchantID, day, eligible, holdID, now, now.Add(s.cfg.CreatedGrace)))
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -239,7 +249,7 @@ func (s *Service) resolvePayout(ctx context.Context, tx pgx.Tx, id uuid.UUID, re
 	}
 	switch res.Status {
 	case bank.Success:
-		if err := s.ledger.CommitHold(ctx, tx, p.HoldEntryID); err != nil {
+		if err := s.ledger.CommitConfirmed(ctx, tx, p.HoldEntryID); err != nil {
 			return Payout{}, fmt.Errorf("payments: commit payout hold: %w", err)
 		}
 		if err := s.ledger.Post(ctx, tx, ledger.Entry{ID: s.ids.New(), Kind: "payout_sent", RefID: p.ID, Postings: []ledger.Posting{

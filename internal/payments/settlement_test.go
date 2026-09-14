@@ -198,3 +198,46 @@ func TestPayoutPendingWaits(t *testing.T) {
 	}
 	e.checkInvariants()
 }
+
+// TestSettlementIgnoresConcurrentCapture: a capture commits while the batch
+// waits for the merchant's account lock. Today's credit must not leak into
+// yesterday's payout. (Found by TestBankChaos: under READ COMMITTED a
+// SELECT … FOR UPDATE re-reads the locked row's new balance but its
+// subqueries keep the old snapshot, so the new credit was counted in the
+// balance and missed by "credits since cutoff".)
+func TestSettlementIgnoresConcurrentCapture(t *testing.T) {
+	e := newEnv(t)
+	e.clk.Set(dayD.Add(10 * time.Hour))
+	e.captured(money.Rupees(1000)) // net 97,640 on day D
+	e.clk.Set(dayD.Add(33 * time.Hour))
+
+	// A capture on D+1 holds the merchant's account lock, uncommitted.
+	payable := e.payable().ID
+	tx, err := e.pool.Begin(e.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(e.ctx)
+	if err := e.svc.Ledger().Post(e.ctx, tx, ledger.Entry{ID: uuid.New(), Kind: "capture", RefID: uuid.New(), Postings: []ledger.Posting{
+		{Account: e.system(ledger.BankReceivable).ID, Side: ledger.Debit, Amount: 50_000},
+		{Account: payable, Side: ledger.Credit, Amount: 50_000},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan payments.SettlementReport)
+	go func() {
+		rep, err := e.svc.RunSettlement(e.ctx, dayD)
+		if err != nil {
+			t.Error(err)
+		}
+		done <- rep
+	}()
+	time.Sleep(300 * time.Millisecond) // the batch is now waiting on the lock
+	if err := tx.Commit(e.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if rep := <-done; rep.Amount != 97_640 {
+		t.Fatalf("payout %v, want ₹976.40: the concurrent D+1 capture leaked into day D", rep.Amount)
+	}
+}
