@@ -3,6 +3,7 @@
 //	KOSH_DATABASE_URL   Postgres URL (default: the compose database)
 //	KOSH_BANK_URL       bank simulator URL (default http://localhost:8091)
 //	KOSH_ADMIN_TOKEN    bearer token for /admin (default: /admin disabled)
+//	KOSH_BANK_CALLBACK_SECRET  HMAC secret for /bank/callbacks (default: callbacks disabled)
 //	KOSH_ADDR           listen address (default :8090)
 //	KOSH_BANK_TIMEOUT   per-call bank timeout (default 30s)
 package main
@@ -57,8 +58,11 @@ func run(log *slog.Logger) error {
 	}
 
 	srv := &http.Server{
-		Addr:              env.String("KOSH_ADDR", ":8090"),
-		Handler:           api.New(svc, os.Getenv("KOSH_ADMIN_TOKEN"), log),
+		Addr: env.String("KOSH_ADDR", ":8090"),
+		Handler: api.New(svc, api.Config{
+			AdminToken:         os.Getenv("KOSH_ADMIN_TOKEN"),
+			BankCallbackSecret: os.Getenv("KOSH_BANK_CALLBACK_SECRET"),
+		}, log),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	errc := make(chan error, 1)

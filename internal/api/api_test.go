@@ -71,7 +71,7 @@ func TestEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(api.New(svc, "admin-secret", nil))
+	srv := httptest.NewServer(api.New(svc, api.Config{AdminToken: "admin-secret"}, nil))
 	defer srv.Close()
 
 	admin := client{t: t, base: srv.URL, auth: "admin-secret"}
@@ -166,7 +166,7 @@ func TestBankTimeoutOverHTTP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(api.New(svc, "admin", nil))
+	srv := httptest.NewServer(api.New(svc, api.Config{AdminToken: "admin"}, nil))
 	defer srv.Close()
 	_, body := client{t: t, base: srv.URL, auth: "admin"}.do("POST", "/admin/merchants", "", map[string]any{"name": "Slow Bank Co"})
 	c := client{t: t, base: srv.URL, auth: decode[payments.CreatedMerchant](t, body).APIKey}
