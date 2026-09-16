@@ -38,22 +38,21 @@ func (w *Worker) RunOnce(ctx context.Context) (Stats, error) {
 	if batch == 0 {
 		batch = 100
 	}
+	// Each task runs even if an earlier one reported errors; the errors are
+	// returned together at the end.
 	var (
-		st  Stats
-		err error
+		st   Stats
+		errs []error
+		err  error
 	)
-	if st.Payments, err = w.Svc.PollPayments(ctx, batch); err != nil {
-		return st, err
-	}
-	if st.Refunds, err = w.Svc.PollRefunds(ctx, batch); err != nil {
-		return st, err
-	}
-	if st.Payouts, err = w.Svc.PollPayouts(ctx, batch); err != nil {
-		return st, err
-	}
-	if st.Expired, err = w.Svc.ExpireHolds(ctx, batch); err != nil {
-		return st, err
-	}
+	st.Payments, err = w.Svc.PollPayments(ctx, batch)
+	errs = append(errs, err)
+	st.Refunds, err = w.Svc.PollRefunds(ctx, batch)
+	errs = append(errs, err)
+	st.Payouts, err = w.Svc.PollPayouts(ctx, batch)
+	errs = append(errs, err)
+	st.Expired, err = w.Svc.ExpireHolds(ctx, batch)
+	errs = append(errs, err)
 
 	every := w.SettlementEvery
 	if every == 0 {
@@ -66,14 +65,14 @@ func (w *Worker) RunOnce(ctx context.Context) (Stats, error) {
 		w.lastSettlement = now
 		rep, err := w.Svc.RunSettlement(ctx, yesterday)
 		if err != nil && !errors.Is(err, payments.ErrTooEarly) {
-			return st, err
+			errs = append(errs, err)
 		}
 		if err == nil {
 			w.lastSettlementOK = day
 			st.Settled = &rep
 		}
 	}
-	return st, nil
+	return st, errors.Join(errs...)
 }
 
 // Run loops until ctx ends, pausing interval between rounds. Errors are

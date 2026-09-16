@@ -289,3 +289,30 @@ func TestRefundPolling(t *testing.T) {
 	}
 	e.checkInvariants()
 }
+
+// TestPollerSkipsPoisonItem: the bank answers one payment with a reference
+// that already belongs to another (a bank bug, or a restarted simulator).
+// That payment can't be applied, but it must not stop the poller from
+// resolving the rest of its batch. (Found in a live smoke run.)
+func TestPollerSkipsPoisonItem(t *testing.T) {
+	e := newEnv(t)
+	taken := e.pay(e.createOrder(1_000).ID) // authorized, owns a bank_ref
+	e.bank.Next(bank.OutcomeTimeoutPending, bank.OutcomeTimeoutPending)
+	bad := e.pay(e.createOrder(2_000).ID)
+	good := e.pay(e.createOrder(3_000).ID)
+	e.bank.Settle(bad.ID, bank.Result{Status: bank.Success, BankRef: *taken.BankRef})
+	e.bank.Settle(good.ID, bank.Result{Status: bank.Success})
+
+	e.clk.Advance(6 * time.Second)
+	n, err := e.svc.PollPayments(e.ctx, 100)
+	if err == nil || n != 1 {
+		t.Fatalf("poll: resolved %d, err %v; want 1 resolved and the poison item reported", n, err)
+	}
+	if got := e.payment(good.ID); got.State != payments.StateAuthorized {
+		t.Fatalf("good payment %s: blocked by the bad one", got.State)
+	}
+	if got := e.payment(bad.ID); got.State != payments.StatePending {
+		t.Fatalf("bad payment %s", got.State)
+	}
+	e.checkInvariants()
+}

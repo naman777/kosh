@@ -88,6 +88,7 @@ type Server struct {
 	order   []uuid.UUID // decision order, for settlement files
 	seq     uint64
 	seed    uint64
+	runTag  string // keeps references unique across simulator restarts
 	mux     *http.ServeMux
 	hc      *http.Client
 
@@ -101,6 +102,7 @@ func New(cfg Config, seed uint64) *Server { return NewWithClock(cfg, seed, clock
 // NewWithClock returns a simulator whose settlement dates follow c.
 func NewWithClock(cfg Config, seed uint64, c clock.Clock) *Server {
 	s := &Server{cfg: cfg, rng: rand.New(rand.NewPCG(seed, 1)), clock: c, seed: seed,
+		runTag:  fmt.Sprintf("%04X", uint16(time.Now().UnixNano()>>10)),
 		records: map[uuid.UUID]*record{}, mux: http.NewServeMux(), hc: &http.Client{Timeout: 5 * time.Second}}
 	s.mux.HandleFunc("POST /v1/authorize", func(w http.ResponseWriter, r *http.Request) {
 		var req bank.AuthorizeRequest
@@ -190,7 +192,7 @@ func (s *Server) answer(w http.ResponseWriter, r *http.Request, req record, pref
 		s.seq++
 		rec = &req
 		rec.DecidedAt, rec.FinalAt = now, now
-		success := bank.Result{Status: bank.Success, BankRef: fmt.Sprintf("%s%09d", prefix, s.seq)}
+		success := bank.Result{Status: bank.Success, BankRef: fmt.Sprintf("%s%s%08d", prefix, s.runTag, s.seq)}
 		switch x := s.rng.Float64(); {
 		case x < cfg.FailRate:
 			rec.Final = bank.Result{Status: bank.Failed, Reason: "declined_by_issuer"}

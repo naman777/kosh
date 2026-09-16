@@ -328,6 +328,7 @@ func (s *Service) ExpireHolds(ctx context.Context, limit int) (int, error) {
 	}
 
 	n := 0
+	var errs []error
 	for _, h := range due {
 		res, err := s.bankStatus(ctx, h.ref)
 		if err != nil {
@@ -349,11 +350,12 @@ func (s *Service) ExpireHolds(ctx context.Context, limit int) (int, error) {
 			return err
 		})
 		if err != nil {
-			return n, err
+			errs = append(errs, fmt.Errorf("expire %s %s: %w", h.kind, h.ref, err))
+			continue
 		}
 		n++
 	}
-	return n, nil
+	return n, errors.Join(errs...)
 }
 
 // GetRefund reads one of a merchant's refunds.

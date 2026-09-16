@@ -175,6 +175,7 @@ func (s *Service) PollPayments(ctx context.Context, limit int) (int, error) {
 		return 0, err
 	}
 	n := 0
+	var errs []error
 	for _, d := range due {
 		res, err := s.bankStatus(ctx, d.id)
 		if err != nil {
@@ -190,11 +191,14 @@ func (s *Service) PollPayments(ctx context.Context, limit int) (int, error) {
 			_, err := s.applyPaymentResult(ctx, tx, d.id, res)
 			return err
 		}); err != nil {
-			return n, err
+			// One bad item must not block the batch: it stays claimed with
+			// backoff, and the rest go ahead.
+			errs = append(errs, fmt.Errorf("payment %s: %w", d.id, err))
+			continue
 		}
 		n++
 	}
-	return n, nil
+	return n, errors.Join(errs...)
 }
 
 // PollRefunds resolves pending refunds. A refund the bank never received
@@ -206,6 +210,7 @@ func (s *Service) PollRefunds(ctx context.Context, limit int) (int, error) {
 		return 0, err
 	}
 	n := 0
+	var errs []error
 	for _, d := range due {
 		res, err := s.bankStatus(ctx, d.id)
 		if err != nil {
@@ -219,7 +224,8 @@ func (s *Service) PollRefunds(ctx context.Context, limit int) (int, error) {
 			if err := s.pool.QueryRow(ctx, `
 				SELECT r.amount, p.bank_ref FROM refunds r JOIN payments p ON p.id = r.payment_id WHERE r.id = $1`,
 				d.id).Scan(&amount, &bankRef); err != nil {
-				return n, err
+				errs = append(errs, fmt.Errorf("refund %s: %w", d.id, err))
+				continue
 			}
 			bctx, cancel := context.WithTimeout(ctx, s.cfg.BankTimeout)
 			res, err = s.bank.Refund(bctx, bank.RefundRequest{RefundID: d.id, PaymentBankRef: deref(bankRef), Amount: money.Paise(amount)})
@@ -235,11 +241,12 @@ func (s *Service) PollRefunds(ctx context.Context, limit int) (int, error) {
 			_, err := s.resolveRefund(ctx, tx, d.id, res)
 			return err
 		}); err != nil {
-			return n, err
+			errs = append(errs, fmt.Errorf("refund %s: %w", d.id, err))
+			continue
 		}
 		n++
 	}
-	return n, nil
+	return n, errors.Join(errs...)
 }
 
 // ErrUnknownCallback means a callback named something Kosh never created.

@@ -298,6 +298,7 @@ func (s *Service) PollPayouts(ctx context.Context, limit int) (int, error) {
 		return 0, err
 	}
 	n := 0
+	var errs []error
 	for _, d := range due {
 		res, err := s.bankStatus(ctx, d.id)
 		if err != nil {
@@ -305,11 +306,12 @@ func (s *Service) PollPayouts(ctx context.Context, limit int) (int, error) {
 		}
 		if res.Status == bank.Failed && res.Reason == bank.ReasonUnknownID {
 			p, err := scanPayout(s.pool.QueryRow(ctx, `SELECT `+payoutCols+` FROM payouts WHERE id = $1`, d.id))
-			if err != nil {
-				return n, err
+			if err == nil {
+				err = s.submitPayout(ctx, p)
 			}
-			if err := s.submitPayout(ctx, p); err != nil {
-				return n, err
+			if err != nil {
+				errs = append(errs, fmt.Errorf("payout %s: %w", d.id, err))
+				continue
 			}
 			n++
 			continue
@@ -318,11 +320,12 @@ func (s *Service) PollPayouts(ctx context.Context, limit int) (int, error) {
 			_, err := s.resolvePayout(ctx, tx, d.id, res)
 			return err
 		}); err != nil {
-			return n, err
+			errs = append(errs, fmt.Errorf("payout %s: %w", d.id, err))
+			continue
 		}
 		n++
 	}
-	return n, nil
+	return n, errors.Join(errs...)
 }
 
 // GetPayout reads one of a merchant's payouts.
