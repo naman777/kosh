@@ -4,15 +4,18 @@ Kosh is a payments core in Go and Postgres. It takes merchant orders, collects p
 
 Kosh (कोष) means treasury.
 
-> **Status: Gate 1 of 2.** Phases 1–3 of the [build plan](IMPLEMENTATION_PLAN.md) are done: the ledger, payments with idempotency, and events with webhooks. Settlement, reconciliation, the simulation harness, load tests and the dashboard come next. Progress is tracked in [progress.md](progress.md).
+> **Status: past Gate 1, phase 4 of 6 done.** The [build plan](IMPLEMENTATION_PLAN.md)'s ledger, payments with idempotency, events with webhooks, and bank chaos with T+1 settlement are built. Reconciliation, the simulation harness, load tests and the dashboard come next. Progress is tracked in [progress.md](progress.md).
 
 ## Architecture
 
 ```mermaid
 flowchart LR
     M[Merchant] -- "REST + Idempotency-Key" --> API[api]
-    API -- authorize / refund --> BANK[banksim<br/>bank + UPI simulator]
+    API -- "authorize / refund" --> BANK[banksim<br/>bank + UPI simulator]
+    BANK -- "signed callbacks<br/>late, duplicated" --> API
     API -- "one transaction:<br/>state + ledger + outbox" --> PG[(Postgres 16<br/>source of truth)]
+    WORKER[worker] -- "status polls, payouts" --> BANK
+    WORKER -- "pollers, hold expiry,<br/>T+1 settlement" --> PG
     PG -- "unpublished rows<br/>FOR UPDATE SKIP LOCKED" --> RELAY[relay]
     RELAY -- kosh.events --> RP[[Redpanda<br/>Kafka API]]
     RP --> DISP[dispatcher]
@@ -20,7 +23,7 @@ flowchart LR
     DISP -- "HMAC-signed POST" --> HOOK[Merchant webhook]
 ```
 
-Postgres is the only source of truth. A state change, its ledger entry and the outbox event announcing it commit in one transaction, before anything leaves the system. The relay copies outbox rows to Kafka. The dispatcher turns each event into a delivery row and retries it until the merchant answers 2xx. Each binary runs on its own, so each can be killed on its own.
+Postgres is the only source of truth. A state change, its ledger entry and the outbox event announcing it commit in one transaction, before anything leaves the system. The relay copies outbox rows to Kafka. The dispatcher turns each event into a delivery row and retries it until the merchant answers 2xx. The worker chases every answer the bank still owes and pays merchants on T+1. Each binary runs on its own, so each can be killed on its own.
 
 ## Numbers
 
@@ -37,6 +40,8 @@ These are measured, not targets. Hardware: Intel Core i5-13450HX (10 cores / 16 
 The last row is the interesting one. Every capture debits `bank_receivable` and credits `fee_revenue` and `gst_payable`. Those three rows are shared by every payment in the system, so captures serialize on their row locks. Throughput drops 7× and p99 goes from 22 ms to over half a second. That is the hot-account problem, measured. [ADR 0003](docs/adr/0003-pessimistic-locking.md) explains why the locking is built this way and the planned fix (sharded system accounts).
 
 Correctness so far: the SQL invariants hold at the end of every database test. Those tests include 50 goroutines making crossing transfers, 10 concurrent refunds on one payment, crashes at every named crashpoint, and a test that kills the real `relay` and `dispatcher` processes (60 events delivered, 30 duplicates, 0 lost). A separate in-memory property test checks the balance and limit rules after each of 1,000,000 random steps.
+
+The bank chaos test (`TestBankChaos`) runs about 100 payments, refunds and a day's settlement over HTTP against a bank that declines 10%, times out 10%, answers "pending" 25%, goes down every 600 ms, and sends each callback up to 4 times. A typical run has around 15 late successes auto-refunded and 250 callbacks applied, and every invariant holds afterwards. It found two real bugs on its first runs (see [progress.md](progress.md#bugs-caught-by-tests)).
 
 ## The ledger in one example
 
@@ -68,7 +73,7 @@ These are the spec. Each is a SQL query in [`invariants/`](invariants) that retu
 | 6 | Same idempotency key + same body → same response; different body → 422, nothing written | checked (SQL + replay tests) |
 | 7 | Every state change writes exactly one outbox event, in the same transaction | checked |
 | 8 | Every event reaches each enabled merchant at least once | checked at quiescence |
-| 9 | A hold resolves at most once and expires by its deadline | enforced and tested; SQL check in phase 4 |
+| 9 | A hold resolves at most once and expires by its deadline | checked |
 | 10 | Every captured payment matches a bank settlement line or is in the exception queue by T+2 | phase 5 |
 | 11 | Posted entries are never updated or deleted | enforced by triggers, checked |
 
@@ -76,7 +81,9 @@ These are the spec. Each is a SQL query in [`invariants/`](invariants) that retu
 
 - **Idempotency** uses Stripe's "atomic phases". A payment request runs in three steps: (A) a transaction that creates the payment and records a recovery point, (B) the bank call, which is idempotent on Kosh's payment id, and (C) a transaction that applies the bank's answer and stores the response. If the process dies between steps, a retry with the same key waits for the dead request's lease to expire, then resumes from the recovery point. Replays return the stored bytes exactly. Leases carry a random fencing token, so a request that lost its lease can never commit.
 - **Concurrency.** Every payment state change is one guarded `UPDATE … WHERE state = $expected`. Ledger accounts are locked in ascending id order, so two entries can never deadlock. Concurrent refunds are serialized on the payment row and bounded by `refunded + x ≤ amount`.
-- **Bank timeouts** leave a payment `pending`, never `failed`: a timeout means "unknown", and the money may have moved. Phase 4 adds the poller that resolves them.
+- **Bank answers** arrive three ways: the API's own call, a signed callback (late and possibly repeated), and the worker's status poll. All three go through one resolver that locks the payment and decides from its current state. A timeout means "unknown", never "failed". A payment the bank never received is failed. One still pending after 30 minutes is failed too, and if the bank says success after that, the **late success** is recorded and an **auto refund** sends the money back to the customer.
+- **Hold deadlines are not commit deadlines.** If the bank confirms a refund or payout after its hold's deadline, the money still moved, so the hold is committed anyway. Expiry asks the bank before it voids anything ([ADR 0005](docs/adr/0005-hold-deadlines.md)).
+- **T+1 settlement.** Each merchant is paid its available balance minus the credits it earned today, so refunds and open holds are netted out and today's sales wait for tomorrow. A payout is a two-phase hold: it posts on bank success and voids on failure, and a failed payout is picked up by the next day's batch. Payouts never time out: failing one the bank later completes would pay twice.
 - **Events** use a transactional outbox, not dual writes. The relay publishes rows and marks them published only after Kafka acknowledges them. A crash in between republishes the batch, so delivery is at-least-once. The dispatcher dedupes with `ON CONFLICT`, and merchants dedupe by event id.
 - **Webhooks** are signed with `Kosh-Signature: t=<unix>,v1=<HMAC-SHA256(secret, t.body)>`. Retries use exponential backoff from 10 s to 1 h with jitter. A merchant failing for 24 hours is paused until it calls `POST /v1/webhooks/replay`.
 
@@ -103,7 +110,11 @@ go run ./cmd/banksim
 ```
 
 ```bash
-KOSH_ADMIN_TOKEN=dev-admin go run ./cmd/api
+KOSH_ADMIN_TOKEN=dev-admin KOSH_BANK_CALLBACK_SECRET=cb-secret go run ./cmd/api
+```
+
+```bash
+go run ./cmd/worker
 ```
 
 ```bash
@@ -144,18 +155,27 @@ curl -s -X POST localhost:8090/v1/payments/<payment id>/capture -H "Authorizatio
 curl -s -X POST localhost:8090/v1/payments/<payment id>/refunds -H "Authorization: Bearer $KEY" -H "Idempotency-Key: ref-1" -d '{"amount":25000}'
 ```
 
-Send the payment request again with the same key and you get the same bytes back. Change the body and you get 422. `curl localhost:8092/admin/stats` shows what the merchant received. To make the bank misbehave:
+Send the payment request again with the same key and you get the same bytes back. Change the body and you get 422. `curl localhost:8092/admin/stats` shows what the merchant received. To make the bank misbehave and send callbacks:
 
 ```bash
-curl -X PUT localhost:8091/admin/config -d '{"fail_rate":0.1,"timeout_rate":0.1,"latency_min_ms":5,"latency_max_ms":50,"hang_for_ms":35000}'
+curl -X PUT localhost:8091/admin/config -d '{"fail_rate":0.1,"timeout_rate":0.1,"pending_rate":0.2,"final_after_ms":2000,"latency_min_ms":5,"latency_max_ms":50,"hang_for_ms":35000,"callback_url":"http://localhost:8090/bank/callbacks","callback_secret":"cb-secret","callback_delay_ms":100,"max_duplicate_callbacks":3}'
 ```
+
+Add `"outage": true` to take the bank down. The worker pays merchants for yesterday automatically. To run a day by hand:
+
+```bash
+curl -s -X POST localhost:8090/admin/settlements/run -H "Authorization: Bearer dev-admin" -d '{"date":"2026-10-17"}'
+```
+
+The bank's settlement file for a day, with its injected bad rows, is at `localhost:8091/v1/settlements/<date>`, and the list of what was injected is at `/admin/settlements/<date>/faults`.
 
 ## Where it breaks
 
 These are known limits, not bugs. Most are scheduled.
 
 - **Hot system accounts.** Every capture locks the same three rows (see Numbers). Sharding `bank_receivable`, `fee_revenue` and `gst_payable` into N sub-accounts is planned for phase 6.
-- **Pending payments are not resolved yet.** A bank timeout leaves a payment `pending` until the phase 4 status poller exists. The money is safe (nothing is posted), but the payment stays stuck.
+- **Some bank surprises wait for reconciliation (phase 5).** A refund the bank completes *after* Kosh gave up on it (24 h pending), or an auto refund the bank declines, leaves the ledger and the bank disagreeing. Nothing goes negative, but only the phase 5 recon engine will surface it as an exception. Until then `bank_settlement` only records cash going out (payouts), never cash coming in.
+- **A bank answer Kosh can't apply** (for example a reference that already belongs to another payment) leaves that one item pending and retrying with backoff. The rest of the batch carries on, but nobody is alerted yet.
 - **Event order across relays.** With one relay, each payment's events reach Kafka in order. With several relays, batches can interleave. Every envelope carries the aggregate's `version`, so receivers can drop stale updates.
 - **At-least-once means duplicates.** The kill test delivered 30 duplicates for 60 events. Merchants must dedupe by `Kosh-Event-Id`.
 - **Determinism.** Postgres runs for real in every test. The app layer is deterministic (clock, ids, randomness and the bank all sit behind interfaces), but concurrent runs are not replayable step by step.
@@ -168,17 +188,18 @@ There is no real bank, UPI or card network, and no real money. There is no card 
 ## Repository
 
 ```text
-cmd/            api, banksim, relay, dispatcher, samplemerchant, ledgerbench
+cmd/            api, worker, banksim, relay, dispatcher, samplemerchant, ledgerbench
 internal/
   money/        paise type, fee and GST rounding
   ledger/       accounts, entries, holds, ordered locking
-  payments/     state machine, orders, payments, refunds, replay
+  payments/     state machine, payments, refunds, bank-answer resolver, pollers, settlement, payouts
+  worker/       background loop: pollers, hold expiry, daily settlement
   idempotency/  atomic phases, leases, stored responses
   outbox/       transactional outbox and relay
   bus/          Kafka (franz-go) and in-memory log
   webhooks/     signing, dispatcher, retries, reference receiver
   bank/         bank client interface, HTTP client, scripted fake
-  banksim/      bank simulator
+  banksim/      bank simulator: faults, callbacks, settlement files
   crash/        named crashpoints
   clock/ ids/ rng/  injectable time, ids and randomness
 invariants/     one SQL file per invariant + checker
