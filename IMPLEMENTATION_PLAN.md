@@ -206,9 +206,56 @@ The create-payment phase C, the bank callback endpoint, and the poller all call 
 - Settlement: the eligible-amount math, a batch run twice gives one payout, payout failure restores the balance, and the next day's batch pays.
 - **Done-when test (`TestBankChaos`):** API + banksim (all faults on, callbacks to the API) + worker loops over HTTP, with many payments, refunds and settlements. Afterwards, invariants 1–9 hold.
 
-## Phases 5–6 (planned in detail later)
+## Phase 5 · Reconciliation and simulation (build plan week 5)
 
-- **Phase 5 · Reconciliation and simulation:** recon engine with six statuses, exception queue, a simulation harness with seed replay (`make sim SEED=…`), 200 seeds in CI and 10,000 locally. All 11 invariants.
+Lessons from phase 4: the bugs worth finding show up when real faults overlap (a late callback crossing a hold deadline, a capture racing a settlement). A deterministic harness that throws thousands of seeded combinations at the system, and can replay any failure, is how to find the next ones on purpose instead of by luck.
+
+### Reconciliation (`internal/recon`)
+
+**Schema (`0005_recon.sql`)**
+
+- `settlement_files` (one per business date, with a checksum so re-ingesting the same file is a no-op and a different file for the same date is refused) and `settlement_lines`.
+- `recon_results`: one row per settlement line, plus one per ledger item the bank never settled. Each has a status, the expected and actual amounts, its effect on the suspense account, and `resolved_by_entry` / `resolved_at`. The **exception queue** is every non-`matched` row that is not resolved.
+- `payments.bank_confirmed_at` and `refunds.bank_confirmed_at`: when Kosh learned the bank succeeded. This is the "T" in T+2.
+- New accounts: `bank_charges` (expense), `recon_suspense` (variances waiting for a human), `recon_writeoff` (expense).
+
+**Matching and the six statuses.** For a file, each line is matched against the pool of bank-confirmed payments and refunds not yet matched: first by `bank_ref`, then by Kosh's reference id (the bank echoes it).
+
+| Status | When | What gets posted |
+| --- | --- | --- |
+| `matched` | found; gross and fee agree | Cr `bank_receivable` gross, Dr `bank_charges` expected fee, Dr `bank_settlement` net |
+| `fee_variance` | found; gross agrees, fee differs from `bank.Fee` | as matched, and the difference goes to `recon_suspense` |
+| `amount_mismatch` | found; gross differs | receivable cleared at the expected gross, cash at actual, difference to suspense |
+| `duplicate` | bank_ref already settled (in this file or an earlier one) | Dr `bank_settlement` / Cr `recon_suspense` (extra cash) |
+| `missing_in_ledger` | no ledger item | Dr `bank_settlement` / Cr `recon_suspense` (unexplained cash) |
+| `missing_in_bank` | a ledger item confirmed before the file's date still unmatched | nothing yet; the receivable stays open |
+
+Each file is reconciled once, in one transaction that writes all results and **one** `bank_settlement` entry for the file. This is where cash finally arrives in `bank_settlement`. A missing item that turns up in a later file is matched then, and its `missing_in_bank` exception auto-closes.
+
+**Resolving exceptions** posts an adjusting entry and never edits anything: `write_off` (suspense or receivable to `recon_writeoff`) or `bank_corrected` (the bank returned or paid the difference: suspense against `bank_settlement`). Each exception resolves exactly once.
+
+**Invariant 10 (SQL):** for the latest reconciled business date D, every bank-confirmed item from before D has a result (matched or `missing_in_bank`). Every line of a reconciled file has exactly one result. `recon_suspense`'s balance equals the sum of open exceptions' suspense effects.
+
+**Accuracy metric.** Banksim's truth endpoint lists the faults it injected. A test reconciles seeded files and scores injected faults classified correctly, plus clean lines matched. The target is 98%.
+
+### Settlement file format (shared)
+
+The file builder moves out of the banksim server into `banksim.BuildSettlement(records, date, …)` with `WriteCSV` / `ParseCSV`. The HTTP simulator and the simulation harness's in-process bank produce byte-identical files, and recon reads them through the same parser.
+
+### Simulation harness (`sim/`, `cmd/sim`)
+
+- **Determinism.** One seed drives the workload RNG, the id generator, the dispatcher's jitter, a fake clock and an in-process **sim bank**. The sim bank decides success, failure, timeout, pending-then-final and outage per request, and queues callbacks (late, 1–4 copies) to deliver at a simulated time. One goroutine runs everything in order, so the same seed gives the same run. Postgres is real (a fresh clone per seed); its own scheduling isn't replayed, but with one goroutine nothing races.
+- **Each step is one action picked by the RNG:** new order and payment, retry the same request (same key), capture, partial refund, two refunds on one payment back to back, deliver due callbacks, advance the clock (seconds to hours), worker round, relay and dispatcher round, flip the merchant endpoint between up and down, toggle a bank outage, ingest and reconcile a settlement file.
+- **Crashes.** Some steps arm a random named crashpoint first. The action panics there, the harness "restarts" (recreates the bus consumer from its committed offset and forgets in-flight state), and the client retries later with the same key.
+- **Checks.** After every step, invariants 1–7, 9, 10 and 11 run. At the end the harness turns faults off, drains (advancing the clock through settlement and reconciliation), and checks all 11, including 8.
+- **Replay.** Every step appends a line to a trace whose hash is reported. A failing seed prints `go run ./cmd/sim -seed N` (or `make sim SEED=N`), and `-v` prints the trace. A test checks that one seed run twice gives the same trace hash.
+- **Scale.** `cmd/sim -seeds 10000 -parallel 8` runs seeds concurrently, each on its own database. CI runs 200 (`KOSH_SIM_SEEDS=200 go test ./sim`), and a plain `go test ./...` runs 20.
+- `testdb` gains a non-test API (`Clone`) so `cmd/sim` and `ledgerbench` don't fake a `testing.TB`.
+
+**Done when** 10,000 seeds pass all 11 invariants and recon classifies the injected faults (≥ 98%).
+
+## Phase 6 (planned in detail later)
+
 - **Phase 6 · Load, observability, launch:** k6 scenarios, Prometheus/Grafana, the Next.js failure lab, GCP deploy, README numbers, demo video.
 
 Each gets its own detailed section here when it starts.
