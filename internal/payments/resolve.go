@@ -34,7 +34,11 @@ func (s *Service) applyPaymentResult(ctx context.Context, tx pgx.Tx, id uuid.UUI
 		switch res.Status {
 		case bank.Success:
 			ref := res.BankRef
-			return s.transition(ctx, tx, id, p.State, StateAuthorized, change{bankRef: &ref})
+			p, err := s.transition(ctx, tx, id, p.State, StateAuthorized, change{bankRef: &ref})
+			if err != nil {
+				return Payment{}, err
+			}
+			return p, s.postAuthorization(ctx, tx, p)
 		case bank.Failed:
 			reason := res.Reason
 			if reason == "" {
@@ -53,6 +57,18 @@ func (s *Service) applyPaymentResult(ctx context.Context, tx pgx.Tx, id uuid.UUI
 		}
 	}
 	return p, nil
+}
+
+// postAuthorization records that the bank collected the customer's money:
+// Dr bank_receivable / Cr unallocated_receipts. Capture later moves it from
+// unallocated_receipts to the merchant, fee and GST. Recognizing the
+// receivable here, not at capture, is what lets reconciliation settle every
+// payment the bank collected, captured or not.
+func (s *Service) postAuthorization(ctx context.Context, tx pgx.Tx, p Payment) error {
+	return s.ledger.Post(ctx, tx, ledger.Entry{ID: s.ids.New(), Kind: "authorization", RefID: p.ID, Postings: []ledger.Posting{
+		{Account: s.sys[ledger.BankReceivable], Side: ledger.Debit, Amount: p.Amount},
+		{Account: s.sys[ledger.UnallocatedReceipts], Side: ledger.Credit, Amount: p.Amount},
+	}})
 }
 
 // lateSuccess handles the bank collecting money for a payment Kosh had

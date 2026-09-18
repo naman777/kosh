@@ -111,8 +111,8 @@ func (s *Service) insertPayment(ctx context.Context, tx pgx.Tx, merchantID uuid.
 	return p.ID, s.emitPayment(ctx, tx, p)
 }
 
-// Capture posts the capture entry: the bank owes Kosh the full amount, and
-// Kosh owes the merchant the amount less fee and GST.
+// Capture posts the capture entry: the authorized money stops being
+// unallocated, and Kosh owes the merchant the amount less fee and GST.
 func (s *Service) Capture(ctx context.Context, k idempotency.Key, paymentID uuid.UUID) (Response, error) {
 	return s.idempotent(ctx, k, func(rec *idempotency.Record) (Response, error) {
 		return s.finish(ctx, rec, http.StatusOK, func(tx pgx.Tx) (any, error) {
@@ -155,7 +155,7 @@ func (s *Service) postCapture(ctx context.Context, tx pgx.Tx, p Payment) error {
 		return err
 	}
 	postings := []ledger.Posting{
-		{Account: s.sys[ledger.BankReceivable], Side: ledger.Debit, Amount: b.Amount},
+		{Account: s.sys[ledger.UnallocatedReceipts], Side: ledger.Debit, Amount: b.Amount},
 		{Account: payable, Side: ledger.Credit, Amount: b.Net},
 		{Account: s.sys[ledger.FeeRevenue], Side: ledger.Credit, Amount: b.Fee},
 		{Account: s.sys[ledger.GSTPayable], Side: ledger.Credit, Amount: b.GST},

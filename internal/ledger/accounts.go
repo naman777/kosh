@@ -23,6 +23,10 @@ const (
 	// PayoutClearing (liability) holds merchant money between payout
 	// initiation and bank confirmation.
 	PayoutClearing = "payout_clearing"
+	// UnallocatedReceipts (liability) is customer money the bank has
+	// collected for an authorized payment that is not yet captured: it
+	// belongs to nobody until capture assigns it to the merchant.
+	UnallocatedReceipts = "unallocated_receipts"
 	// CustomerRefundPayable (liability) is money Kosh owes customers whose
 	// payment succeeded at the bank after Kosh had marked it failed.
 	CustomerRefundPayable = "customer_refund_payable"
@@ -54,6 +58,7 @@ var SystemAccounts = []AccountSpec{
 	{Code: GSTPayable, Normal: NormalCredit},
 	{Code: PayoutClearing, Normal: NormalCredit},
 	{Code: CustomerRefundPayable, Normal: NormalCredit, Flags: DebitsMustNotExceedCredits},
+	{Code: UnallocatedReceipts, Normal: NormalCredit, Flags: DebitsMustNotExceedCredits},
 	{Code: BankCharges, Normal: NormalDebit},
 	{Code: ReconSuspense, Normal: NormalDebit},
 	{Code: ReconWriteoff, Normal: NormalDebit},
