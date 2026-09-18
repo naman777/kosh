@@ -102,7 +102,8 @@ func (s *Service) transition(ctx context.Context, tx pgx.Tx, id uuid.UUID, from,
 		SET state = $3, version = version + 1, updated_at = $4,
 		    bank_ref = COALESCE($5, bank_ref),
 		    failure_reason = COALESCE($6, failure_reason),
-		    next_poll_at = $7
+		    next_poll_at = $7,
+		    bank_confirmed_at = CASE WHEN $5::text IS NOT NULL THEN $4 ELSE bank_confirmed_at END
 		WHERE id = $1 AND state = $2
 		RETURNING `+paymentCols,
 		id, from, to, now, c.bankRef, c.failureReason, nextPoll))

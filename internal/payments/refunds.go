@@ -285,7 +285,8 @@ func (s *Service) setRefundState(ctx context.Context, tx pgx.Tx, id uuid.UUID, s
 		UPDATE refunds
 		SET state = $2, version = version + 1, updated_at = $3,
 		    bank_ref = COALESCE($4, bank_ref), failure_reason = COALESCE($5, failure_reason),
-		    next_poll_at = NULL
+		    next_poll_at = NULL,
+		    bank_confirmed_at = CASE WHEN $4::text IS NOT NULL THEN $3 ELSE bank_confirmed_at END
 		WHERE id = $1 AND state = 'pending'
 		RETURNING `+refundCols, id, state, s.clock.Now(), bankRef, reason))
 	if err != nil {

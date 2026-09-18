@@ -26,6 +26,13 @@ const (
 	// CustomerRefundPayable (liability) is money Kosh owes customers whose
 	// payment succeeded at the bank after Kosh had marked it failed.
 	CustomerRefundPayable = "customer_refund_payable"
+	// BankCharges (expense) is what the bank deducts from settlements.
+	BankCharges = "bank_charges"
+	// ReconSuspense holds settlement differences until someone resolves them:
+	// a debit balance is money the bank owes Kosh, a credit balance the reverse.
+	ReconSuspense = "recon_suspense"
+	// ReconWriteoff (expense) absorbs differences resolved as written off.
+	ReconWriteoff = "recon_writeoff"
 	// MerchantPayable (liability) is what Kosh owes a merchant. It may never
 	// go negative, counting holds.
 	MerchantPayable = "merchant_payable"
@@ -47,6 +54,9 @@ var SystemAccounts = []AccountSpec{
 	{Code: GSTPayable, Normal: NormalCredit},
 	{Code: PayoutClearing, Normal: NormalCredit},
 	{Code: CustomerRefundPayable, Normal: NormalCredit, Flags: DebitsMustNotExceedCredits},
+	{Code: BankCharges, Normal: NormalDebit},
+	{Code: ReconSuspense, Normal: NormalDebit},
+	{Code: ReconWriteoff, Normal: NormalDebit},
 }
 
 // MerchantPayableSpec is the per-merchant payable account.

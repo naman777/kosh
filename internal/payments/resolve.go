@@ -72,7 +72,7 @@ func (s *Service) lateSuccess(ctx context.Context, tx pgx.Tx, p Payment, res ban
 	}
 	now := s.clock.Now()
 	p, err := scanPayment(tx.QueryRow(ctx, `
-		UPDATE payments SET bank_ref = $2, updated_at = $3
+		UPDATE payments SET bank_ref = $2, updated_at = $3, bank_confirmed_at = $3
 		WHERE id = $1 AND bank_ref IS NULL
 		RETURNING `+paymentCols, p.ID, res.BankRef, now))
 	if err != nil {
