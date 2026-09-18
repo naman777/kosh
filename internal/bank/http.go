@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 
@@ -73,4 +74,27 @@ func (c *HTTPClient) Payout(ctx context.Context, req PayoutRequest) (Result, err
 // Status implements Client.
 func (c *HTTPClient) Status(ctx context.Context, id uuid.UUID) (Result, error) {
 	return c.do(ctx, http.MethodGet, "/v1/status/"+id.String(), nil)
+}
+
+// SettlementSource fetches the bank's settlement file for a business date
+// (YYYY-MM-DD, IST) as raw CSV.
+type SettlementSource interface {
+	SettlementFile(ctx context.Context, date string) ([]byte, error)
+}
+
+// SettlementFile implements SettlementSource.
+func (c *HTTPClient) SettlementFile(ctx context.Context, date string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+"/v1/settlements/"+date, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("bank: settlement file %s: status %d", date, resp.StatusCode)
+	}
+	return io.ReadAll(io.LimitReader(resp.Body, 64<<20))
 }

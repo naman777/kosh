@@ -1,12 +1,14 @@
 package banksim_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -178,6 +180,41 @@ func TestSettlementFile(t *testing.T) {
 	for _, l := range lines {
 		if l.Net != l.Gross-l.Fee-l.Tax || l.ValueDate != "2026-11-10" {
 			t.Fatalf("bad line %+v", l)
+		}
+	}
+}
+
+func TestSettlementCSVRoundTrip(t *testing.T) {
+	clk := clock.NewFake(t0)
+	sim, c := start(t, banksim.Config{Settlement: banksim.SettlementFaults{DuplicateRate: 0.2, MismatchRate: 0.2}}, clk)
+	ctx := context.Background()
+	for i := 0; i < 50; i++ {
+		c.Authorize(ctx, bank.AuthorizeRequest{PaymentID: uuid.New(), Amount: money.Paise(1_000 + i), Method: "card"})
+	}
+	want, _, _ := sim.Settlement("2026-11-09")
+	raw, err := c.SettlementFile(ctx, "2026-11-09")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := banksim.ParseCSV(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("%d lines parsed, %d built", len(got), len(want))
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Fatalf("line %d: %+v != %+v", i, got[i], want[i])
+		}
+	}
+	for _, bad := range []string{
+		"",
+		"line_no,bank_ref,reference,gross,fee,tax,net,value_date\n1,UTR1,x,100,1,0,98,2026-11-10\n",  // net doesn't add up
+		"line_no,bank_ref,reference,gross,fee,tax,net,value_date\n2,UTR1,x,100,0,0,100,2026-11-10\n", // numbering
+	} {
+		if _, err := banksim.ParseCSV(strings.NewReader(bad)); err == nil {
+			t.Errorf("accepted malformed file %q", bad)
 		}
 	}
 }
