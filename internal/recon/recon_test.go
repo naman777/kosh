@@ -85,7 +85,9 @@ func (e *env) sale(amount int64, method string, capture bool) payments.PaymentVi
 	var p payments.PaymentView
 	json.Unmarshal(e.call(e.svc.CreatePayment, "/v1/payments", map[string]any{"order_id": o.ID, "method": method}), &p)
 	if capture {
-		e.call(func(ctx context.Context, k idempotency.Key) (payments.Response, error) { return e.svc.Capture(ctx, k, p.ID) },
+		e.call(func(ctx context.Context, k idempotency.Key) (payments.Response, error) {
+			return e.svc.Capture(ctx, k, p.ID)
+		},
 			"/v1/payments/"+p.ID.String()+"/capture", map[string]any{})
 	}
 	return p
@@ -93,7 +95,9 @@ func (e *env) sale(amount int64, method string, capture bool) payments.PaymentVi
 
 func (e *env) refund(p payments.PaymentView, amount int64) {
 	e.t.Helper()
-	e.call(func(ctx context.Context, k idempotency.Key) (payments.Response, error) { return e.svc.CreateRefund(ctx, k, p.ID) },
+	e.call(func(ctx context.Context, k idempotency.Key) (payments.Response, error) {
+		return e.svc.CreateRefund(ctx, k, p.ID)
+	},
 		"/v1/payments/"+p.ID.String()+"/refunds", map[string]any{"amount": amount})
 }
 

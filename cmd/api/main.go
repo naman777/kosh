@@ -20,9 +20,12 @@ import (
 
 	"github.com/naman777/kosh/internal/api"
 	"github.com/naman777/kosh/internal/bank"
+	"github.com/naman777/kosh/internal/clock"
 	"github.com/naman777/kosh/internal/db"
 	"github.com/naman777/kosh/internal/env"
+	"github.com/naman777/kosh/internal/ids"
 	"github.com/naman777/kosh/internal/payments"
+	"github.com/naman777/kosh/internal/recon"
 )
 
 func main() {
@@ -48,11 +51,12 @@ func run(log *slog.Logger) error {
 
 	cfg := payments.DefaultConfig()
 	cfg.BankTimeout = env.Duration("KOSH_BANK_TIMEOUT", cfg.BankTimeout)
-	svc, err := payments.New(ctx, payments.Deps{
-		Pool:   pool,
-		Bank:   bank.NewHTTPClient(env.String("KOSH_BANK_URL", "http://localhost:8091")),
-		Config: cfg,
-	})
+	bc := bank.NewHTTPClient(env.String("KOSH_BANK_URL", "http://localhost:8091"))
+	svc, err := payments.New(ctx, payments.Deps{Pool: pool, Bank: bc, Config: cfg})
+	if err != nil {
+		return err
+	}
+	rec, err := recon.New(ctx, pool, clock.Real{}, ids.Random{})
 	if err != nil {
 		return err
 	}
@@ -62,6 +66,8 @@ func run(log *slog.Logger) error {
 		Handler: api.New(svc, api.Config{
 			AdminToken:         os.Getenv("KOSH_ADMIN_TOKEN"),
 			BankCallbackSecret: os.Getenv("KOSH_BANK_CALLBACK_SECRET"),
+			Recon:              rec,
+			Settlements:        bc,
 		}, log),
 		ReadHeaderTimeout: 5 * time.Second,
 	}

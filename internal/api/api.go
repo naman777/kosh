@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/naman777/kosh/internal/bank"
 	"github.com/naman777/kosh/internal/idempotency"
 	"github.com/naman777/kosh/internal/payments"
+	"github.com/naman777/kosh/internal/recon"
 )
 
 // maxBody caps request bodies at 64 KiB.
@@ -29,6 +31,9 @@ type Config struct {
 	AdminToken string
 	// BankCallbackSecret verifies /bank/callbacks. Empty disables callbacks.
 	BankCallbackSecret string
+	// Recon and Settlements enable /admin/recon. Nil disables it.
+	Recon       *recon.Engine
+	Settlements bank.SettlementSource
 }
 
 // Server routes requests.
@@ -50,6 +55,9 @@ func New(svc *payments.Service, cfg Config, log *slog.Logger) *Server {
 	s.mux.HandleFunc("POST /admin/merchants", s.admin(s.createMerchant))
 	s.mux.HandleFunc("POST /admin/settlements/run", s.admin(s.runSettlement))
 	s.mux.HandleFunc("POST /bank/callbacks", s.bankCallback)
+	s.mux.HandleFunc("POST /admin/recon/run", s.admin(s.reconRun))
+	s.mux.HandleFunc("GET /admin/recon/exceptions", s.admin(s.reconExceptions))
+	s.mux.HandleFunc("POST /admin/recon/exceptions/{id}/resolve", s.admin(s.reconResolve))
 	s.mux.HandleFunc("GET /v1/payouts/{id}", s.merchant(func(w http.ResponseWriter, r *http.Request, m uuid.UUID) {
 		id, ok := s.pathID(w, r)
 		if ok {
@@ -208,6 +216,86 @@ func (s *Server) runSettlement(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, rep)
+}
+
+func (s *Server) reconEnabled(w http.ResponseWriter, r *http.Request) bool {
+	if s.cfg.Recon == nil || s.cfg.Settlements == nil {
+		s.writeError(w, r, &payments.Error{Status: http.StatusNotFound, Code: "not_found", Message: "reconciliation is not enabled"})
+		return false
+	}
+	return true
+}
+
+// reconRun is POST /admin/recon/run {"date": "YYYY-MM-DD"}: fetch, ingest and
+// reconcile the bank's file for that day. Safe to repeat.
+func (s *Server) reconRun(w http.ResponseWriter, r *http.Request) {
+	if !s.reconEnabled(w, r) {
+		return
+	}
+	var in struct {
+		Date string `json:"date"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBody)).Decode(&in); err != nil {
+		s.writeError(w, r, &payments.Error{Status: http.StatusBadRequest, Code: "bad_request", Message: err.Error()})
+		return
+	}
+	rep, err := s.cfg.Recon.ReconcileDay(r.Context(), s.cfg.Settlements, in.Date)
+	if errors.Is(err, recon.ErrFileConflict) {
+		s.writeError(w, r, &payments.Error{Status: http.StatusConflict, Code: "file_conflict", Message: err.Error()})
+		return
+	}
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, rep)
+}
+
+// reconExceptions is GET /admin/recon/exceptions: the open exception queue.
+func (s *Server) reconExceptions(w http.ResponseWriter, r *http.Request) {
+	if !s.reconEnabled(w, r) {
+		return
+	}
+	exc, err := s.cfg.Recon.Exceptions(r.Context(), 500)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	if exc == nil {
+		exc = []recon.Result{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"exceptions": exc})
+}
+
+// reconResolve is POST /admin/recon/exceptions/{id}/resolve
+// {"action": "write_off" | "bank_corrected"}.
+func (s *Server) reconResolve(w http.ResponseWriter, r *http.Request) {
+	if !s.reconEnabled(w, r) {
+		return
+	}
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		s.writeError(w, r, notFound())
+		return
+	}
+	var in struct {
+		Action string `json:"action"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBody)).Decode(&in); err != nil {
+		s.writeError(w, r, &payments.Error{Status: http.StatusBadRequest, Code: "bad_request", Message: err.Error()})
+		return
+	}
+	res, err := s.cfg.Recon.Resolve(r.Context(), id, in.Action)
+	switch {
+	case errors.Is(err, recon.ErrNotOpen):
+		s.writeError(w, r, &payments.Error{Status: http.StatusConflict, Code: "not_open", Message: err.Error()})
+	case errors.Is(err, recon.ErrBadResolution):
+		s.writeError(w, r, &payments.Error{Status: http.StatusUnprocessableEntity, Code: "bad_resolution", Message: err.Error()})
+	case err != nil:
+		s.writeError(w, r, err)
+	default:
+		writeJSON(w, http.StatusOK, res)
+	}
 }
 
 // bankCallback receives the bank's asynchronous answers. A bad signature is

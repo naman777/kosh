@@ -1,5 +1,6 @@
 // Command worker runs Kosh's background recovery: status pollers for
-// payments, refunds and payouts, hold expiry, and the daily T+1 settlement.
+// payments, refunds and payouts, hold expiry, the daily T+1 settlement, and
+// reconciliation of the bank's settlement files.
 //
 //	KOSH_DATABASE_URL    Postgres URL (default: the compose database)
 //	KOSH_BANK_URL        bank simulator URL (default http://localhost:8091)
@@ -20,7 +21,9 @@ import (
 	"github.com/naman777/kosh/internal/clock"
 	"github.com/naman777/kosh/internal/db"
 	"github.com/naman777/kosh/internal/env"
+	"github.com/naman777/kosh/internal/ids"
 	"github.com/naman777/kosh/internal/payments"
+	"github.com/naman777/kosh/internal/recon"
 	"github.com/naman777/kosh/internal/worker"
 )
 
@@ -44,14 +47,16 @@ func run(log *slog.Logger) error {
 	if err := db.Migrate(ctx, pool); err != nil {
 		return err
 	}
-	svc, err := payments.New(ctx, payments.Deps{
-		Pool: pool,
-		Bank: bank.NewHTTPClient(env.String("KOSH_BANK_URL", "http://localhost:8091")),
-	})
+	bc := bank.NewHTTPClient(env.String("KOSH_BANK_URL", "http://localhost:8091"))
+	svc, err := payments.New(ctx, payments.Deps{Pool: pool, Bank: bc})
 	if err != nil {
 		return err
 	}
-	w := &worker.Worker{Svc: svc, Clock: clock.Real{}, Log: log}
+	rec, err := recon.New(ctx, pool, clock.Real{}, ids.Random{})
+	if err != nil {
+		return err
+	}
+	w := &worker.Worker{Svc: svc, Clock: clock.Real{}, Log: log, Recon: rec, Settlements: bc}
 	log.Info("worker running")
 	return w.Run(ctx, env.Duration("KOSH_WORKER_INTERVAL", time.Second))
 }

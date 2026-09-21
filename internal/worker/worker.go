@@ -1,5 +1,6 @@
 // Package worker runs Kosh's background recovery: the status pollers for
-// payments, refunds and payouts, hold expiry, and the daily T+1 settlement.
+// payments, refunds and payouts, hold expiry, the daily T+1 settlement, and
+// reconciliation of the bank's settlement files.
 // Every task is safe to run from several workers at once (claims use
 // SKIP LOCKED, settlement is unique per merchant and day).
 package worker
@@ -10,8 +11,10 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/naman777/kosh/internal/bank"
 	"github.com/naman777/kosh/internal/clock"
 	"github.com/naman777/kosh/internal/payments"
+	"github.com/naman777/kosh/internal/recon"
 )
 
 // Worker drives the background tasks.
@@ -19,6 +22,9 @@ type Worker struct {
 	Svc   *payments.Service
 	Clock clock.Clock
 	Log   *slog.Logger
+	// Recon and Settlements enable daily reconciliation; nil skips it.
+	Recon       *recon.Engine
+	Settlements bank.SettlementSource
 
 	Batch            int           // rows per poll round; default 100
 	SettlementEvery  time.Duration // how often to try yesterday's settlement; default 10 min
@@ -30,6 +36,7 @@ type Worker struct {
 type Stats struct {
 	Payments, Refunds, Payouts, Expired int
 	Settled                             *payments.SettlementReport
+	Reconciled                          *recon.Report
 }
 
 // RunOnce runs every task once.
@@ -68,8 +75,21 @@ func (w *Worker) RunOnce(ctx context.Context) (Stats, error) {
 			errs = append(errs, err)
 		}
 		if err == nil {
-			w.lastSettlementOK = day
 			st.Settled = &rep
+		}
+		// Yesterday's bank file arrives today: reconcile it.
+		ok := err == nil
+		if w.Recon != nil && w.Settlements != nil {
+			rrep, err := w.Recon.ReconcileDay(ctx, w.Settlements, day)
+			if err != nil {
+				errs = append(errs, err)
+				ok = false
+			} else {
+				st.Reconciled = &rrep
+			}
+		}
+		if ok {
+			w.lastSettlementOK = day
 		}
 	}
 	return st, errors.Join(errs...)
