@@ -172,7 +172,7 @@ func (d *Dispatcher) IngestOnce(ctx context.Context, c bus.Consumer) (int, error
 	if err := d.Ingest(ctx, recs); err != nil {
 		return 0, err
 	}
-	crash.Point("dispatcher.after_ingest") // in the DB, offsets not committed: redelivered on restart
+	crash.At(ctx, "dispatcher.after_ingest") // in the DB, offsets not committed: redelivered on restart
 	return len(recs), c.Commit(ctx, recs)
 }
 
@@ -198,7 +198,7 @@ func (d *Dispatcher) SendOnce(ctx context.Context) (int, error) {
 	if err != nil || len(batch) == 0 {
 		return 0, err
 	}
-	crash.Point("dispatcher.after_claim")
+	crash.At(ctx, "dispatcher.after_claim")
 
 	type result struct {
 		status int
@@ -225,7 +225,7 @@ func (d *Dispatcher) SendOnce(ctx context.Context) (int, error) {
 		}(i, c)
 	}
 	wg.Wait()
-	crash.Point("dispatcher.after_send") // merchant has it, we haven't recorded it
+	crash.At(ctx, "dispatcher.after_send") // merchant has it, we haven't recorded it
 
 	for i, c := range batch {
 		if err := d.record(ctx, c, results[i].status, results[i].err); err != nil {
@@ -247,7 +247,7 @@ func (d *Dispatcher) claim(ctx context.Context) ([]claimed, error) {
 			JOIN merchants m ON m.id = d.merchant_id
 			WHERE d.delivered_at IS NULL AND d.next_attempt_at <= $1
 			  AND m.webhook_disabled_at IS NULL AND m.webhook_url IS NOT NULL
-			ORDER BY d.next_attempt_at
+			ORDER BY d.next_attempt_at, d.event_id, d.merchant_id
 			LIMIT $2
 			FOR UPDATE OF d SKIP LOCKED`, now, d.BatchSize)
 		if err != nil {

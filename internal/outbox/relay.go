@@ -77,11 +77,11 @@ func (r *Relay) RunOnce(ctx context.Context) (int, error) {
 			return nil
 		}
 
-		crash.Point("relay.before_publish")
+		crash.At(ctx, "relay.before_publish")
 		if err := r.Publisher.Publish(ctx, msgs); err != nil {
 			return fmt.Errorf("relay: publish: %w", err)
 		}
-		crash.Point("relay.after_publish") // published but not marked: the duplicate window
+		crash.At(ctx, "relay.after_publish") // published but not marked: the duplicate window
 
 		if _, err := tx.Exec(ctx, `UPDATE outbox SET published_at = $2 WHERE id = ANY($1)`, ids, r.Clock.Now()); err != nil {
 			return err

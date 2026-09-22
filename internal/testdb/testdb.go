@@ -127,52 +127,72 @@ func NewWithURL(t testing.TB) (*pgxpool.Pool, string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-
-	tpl, err := ensureTemplate(ctx)
+	db, err := Clone(ctx, 40)
 	if err != nil {
 		t.Fatalf("testdb: %v", err)
 	}
+	t.Cleanup(func() {
+		if err := db.Drop(); err != nil {
+			t.Logf("testdb: %v", err)
+		}
+	})
+	return db.Pool, db.URL
+}
 
+// DB is a cloned database.
+type DB struct {
+	Pool *pgxpool.Pool
+	URL  string
+	name string
+}
+
+// Clone creates a fresh, migrated database outside of a test (cmd/sim,
+// ledgerbench). Call Drop when done.
+func Clone(ctx context.Context, maxConns int32) (*DB, error) {
+	tpl, err := ensureTemplate(ctx)
+	if err != nil {
+		return nil, err
+	}
 	var b [6]byte
 	_, _ = rand.Read(b[:])
 	name := "kosh_t_" + hex.EncodeToString(b[:])
 
 	admin, err := pgx.Connect(ctx, adminURL())
 	if err != nil {
-		t.Fatalf("testdb: connect admin: %v", err)
+		return nil, fmt.Errorf("connect admin: %w", err)
 	}
 	defer admin.Close(ctx)
 	if _, err := admin.Exec(ctx, `CREATE DATABASE `+pgx.Identifier{name}.Sanitize()+` TEMPLATE `+pgx.Identifier{tpl}.Sanitize()); err != nil {
-		t.Fatalf("testdb: clone template: %v", err)
+		return nil, fmt.Errorf("clone template: %w", err)
 	}
-
 	u, err := withDatabase(adminURL(), name)
 	if err != nil {
-		t.Fatalf("testdb: %v", err)
+		return nil, err
 	}
 	cfg, err := pgxpool.ParseConfig(u)
 	if err != nil {
-		t.Fatalf("testdb: %v", err)
+		return nil, err
 	}
-	cfg.MaxConns = 40
+	cfg.MaxConns = maxConns
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
-		t.Fatalf("testdb: open: %v", err)
+		return nil, fmt.Errorf("open: %w", err)
 	}
+	return &DB{Pool: pool, URL: u, name: name}, nil
+}
 
-	t.Cleanup(func() {
-		pool.Close()
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		admin, err := pgx.Connect(ctx, adminURL())
-		if err != nil {
-			t.Logf("testdb: cleanup connect: %v", err)
-			return
-		}
-		defer admin.Close(ctx)
-		if _, err := admin.Exec(ctx, `DROP DATABASE IF EXISTS `+pgx.Identifier{name}.Sanitize()+` WITH (FORCE)`); err != nil {
-			t.Logf("testdb: drop %s: %v", name, err)
-		}
-	})
-	return pool, u
+// Drop closes the pool and drops the database.
+func (d *DB) Drop() error {
+	d.Pool.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	admin, err := pgx.Connect(ctx, adminURL())
+	if err != nil {
+		return fmt.Errorf("drop %s: connect: %w", d.name, err)
+	}
+	defer admin.Close(ctx)
+	if _, err := admin.Exec(ctx, `DROP DATABASE IF EXISTS `+pgx.Identifier{d.name}.Sanitize()+` WITH (FORCE)`); err != nil {
+		return fmt.Errorf("drop %s: %w", d.name, err)
+	}
+	return nil
 }

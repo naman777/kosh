@@ -53,7 +53,7 @@ func (s *Service) CreatePayment(ctx context.Context, k idempotency.Key) (Respons
 				return Response{}, err
 			}
 		}
-		crash.Point("payments.create.after_insert")
+		crash.At(ctx, "payments.create.after_insert")
 
 		p, err := s.getPayment(ctx, s.pool, k.MerchantID, rec.ResourceID.UUID, false)
 		if err != nil {
@@ -73,7 +73,7 @@ func (s *Service) CreatePayment(ctx context.Context, k idempotency.Key) (Respons
 		if err != nil {
 			res = bank.Result{Status: bank.Pending}
 		}
-		crash.Point("payments.create.after_bank")
+		crash.At(ctx, "payments.create.after_bank")
 
 		return s.finish(ctx, rec, http.StatusCreated, func(tx pgx.Tx) (any, error) {
 			// The poller or a callback may have got here first; the resolver

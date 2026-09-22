@@ -141,7 +141,7 @@ func (s *Service) claimDue(ctx context.Context, table, unresolved string, limit 
 		rows, err := tx.Query(ctx, `
 			SELECT id, created_at, poll_attempts FROM `+table+`
 			WHERE `+unresolved+` AND next_poll_at <= $1
-			ORDER BY next_poll_at
+			ORDER BY next_poll_at, id
 			LIMIT $2
 			FOR UPDATE SKIP LOCKED`, now, limit)
 		if err != nil {

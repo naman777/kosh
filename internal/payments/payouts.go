@@ -145,7 +145,7 @@ func (s *Service) RunSettlement(ctx context.Context, date time.Time) (Settlement
 		}
 		rep.Payouts++
 		rep.Amount += p.Amount
-		crash.Point("payouts.after_hold")
+		crash.At(ctx, "payouts.after_hold")
 		if err := s.submitPayout(ctx, p); err != nil {
 			return rep, err
 		}
@@ -228,7 +228,7 @@ func (s *Service) submitPayout(ctx context.Context, p Payout) error {
 	if err != nil {
 		return nil
 	}
-	crash.Point("payouts.after_bank")
+	crash.At(ctx, "payouts.after_bank")
 	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		_, err := s.resolvePayout(ctx, tx, p.ID, res)
 		return err

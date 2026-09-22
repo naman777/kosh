@@ -1,6 +1,6 @@
 // Package crash provides named crashpoints for failure testing.
 //
-// Code calls crash.Point("relay.after_publish") at places where a process
+// Code calls crash.At(ctx, "relay.after_publish") at places where a process
 // death would be interesting. Normally that is a no-op. When the environment
 // variable KOSH_CRASHPOINT names the point, the process exits immediately
 // with status 137, as if it had been SIGKILLed: no deferred calls, no
@@ -9,6 +9,7 @@
 package crash
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -102,4 +103,52 @@ func Recover(fn func()) (point string, crashed bool) {
 	}()
 	fn()
 	return "", false
+}
+
+type ctxKey struct{}
+
+// Arms is a set of crashpoints armed for one context, so concurrent
+// simulation runs in one process don't trigger each other's crashes.
+type Arms struct {
+	mu sync.Mutex
+	m  map[string]int
+}
+
+// WithArms returns a context carrying a fresh, empty set of arms.
+func WithArms(ctx context.Context) (context.Context, *Arms) {
+	a := &Arms{m: map[string]int{}}
+	return context.WithValue(ctx, ctxKey{}, a), a
+}
+
+// Arm makes the next count hits of name, under this context, panic with
+// Crashed.
+func (a *Arms) Arm(name string, count int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.m[name] = count
+}
+
+// Clear disarms everything.
+func (a *Arms) Clear() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.m = map[string]int{}
+}
+
+func (a *Arms) take(name string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.m[name] > 0 {
+		a.m[name]--
+		return true
+	}
+	return false
+}
+
+// At is Point plus the arms carried by ctx, if any.
+func At(ctx context.Context, name string) {
+	if a, ok := ctx.Value(ctxKey{}).(*Arms); ok && a.take(name) {
+		panic(Crashed{Point: name})
+	}
+	Point(name)
 }

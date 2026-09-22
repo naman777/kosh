@@ -287,7 +287,7 @@ func (l *Ledger) ExpireHolds(ctx context.Context, tx pgx.Tx, limit int) ([]Expir
 	rows, err := tx.Query(ctx, `
 		SELECT id, kind, ref_id FROM journal_entries
 		WHERE state = 'pending' AND expires_at <= $1
-		ORDER BY expires_at
+		ORDER BY expires_at, id
 		LIMIT $2
 		FOR UPDATE SKIP LOCKED`, l.clock.Now(), limit)
 	if err != nil {

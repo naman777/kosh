@@ -115,3 +115,11 @@ func (c *memConsumer) Commit(_ context.Context, recs []Record) error {
 }
 
 func (c *memConsumer) Close() {}
+
+// Lag is how many messages this consumer has not polled yet. The simulation
+// harness uses it to drain the log without wall-clock timeouts.
+func (c *memConsumer) Lag() int {
+	c.m.mu.Lock()
+	defer c.m.mu.Unlock()
+	return len(c.m.log) - int(c.pos)
+}

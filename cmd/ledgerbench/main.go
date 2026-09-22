@@ -18,7 +18,6 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
-	"testing"
 	"time"
 
 	"github.com/google/uuid"
@@ -38,11 +37,11 @@ func main() {
 	mode := flag.String("mode", "spread", "spread | hot | capture")
 	flag.Parse()
 
-	// testdb wants a testing.TB for cleanup; a tiny adapter is enough here.
-	tb := &tbAdapter{}
-	defer tb.cleanup()
-	pool := testdb.New(tb)
 	ctx := context.Background()
+	scratch, err := testdb.Clone(ctx, int32(*workers)+4)
+	check(err)
+	defer scratch.Drop()
+	pool := scratch.Pool
 	l := ledger.New(clock.Real{})
 	sys, err := l.EnsureSystemAccounts(ctx, pool)
 	check(err)
@@ -124,7 +123,7 @@ func main() {
 	fmt.Printf("  latency     p50 %.2f ms  p99 %.2f ms  max %.2f ms\n", ms(pct(0.5)), ms(pct(0.99)), ms(pct(1)))
 	fmt.Printf("  invariants  %s\n", rep)
 	if !rep.OK() {
-		tb.cleanup()
+		scratch.Drop()
 		os.Exit(1)
 	}
 }
@@ -136,21 +135,4 @@ func check(err error) {
 		fmt.Fprintln(os.Stderr, "ledgerbench:", err)
 		os.Exit(1)
 	}
-}
-
-// tbAdapter satisfies testing.TB for testdb outside a test.
-type tbAdapter struct {
-	testing.TB
-	fns []func()
-}
-
-func (t *tbAdapter) Helper()                   {}
-func (t *tbAdapter) Cleanup(f func())          { t.fns = append(t.fns, f) }
-func (t *tbAdapter) Fatalf(f string, a ...any) { check(fmt.Errorf(f, a...)) }
-func (t *tbAdapter) Logf(f string, a ...any)   { fmt.Fprintf(os.Stderr, f+"\n", a...) }
-func (t *tbAdapter) cleanup() {
-	for i := len(t.fns) - 1; i >= 0; i-- {
-		t.fns[i]()
-	}
-	t.fns = nil
 }

@@ -99,7 +99,7 @@ func (s *Service) CreateRefund(ctx context.Context, k idempotency.Key, paymentID
 				return Response{}, err
 			}
 		}
-		crash.Point("refunds.create.after_reserve")
+		crash.At(ctx, "refunds.create.after_reserve")
 
 		r, err := scanRefund(s.pool.QueryRow(ctx, `SELECT `+refundCols+` FROM refunds WHERE id = $1`, rec.ResourceID.UUID))
 		if err != nil {
@@ -122,7 +122,7 @@ func (s *Service) CreateRefund(ctx context.Context, k idempotency.Key, paymentID
 		if err != nil {
 			res = bank.Result{Status: bank.Pending}
 		}
-		crash.Point("refunds.create.after_bank")
+		crash.At(ctx, "refunds.create.after_bank")
 
 		return s.finish(ctx, rec, http.StatusCreated, func(tx pgx.Tx) (any, error) {
 			r, err := s.resolveRefund(ctx, tx, r.ID, res)
@@ -305,7 +305,7 @@ func (s *Service) ExpireHolds(ctx context.Context, limit int) (int, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT kind, ref_id FROM journal_entries
 		WHERE state = 'pending' AND expires_at <= $1
-		ORDER BY expires_at
+		ORDER BY expires_at, id
 		LIMIT $2`, s.clock.Now(), limit)
 	if err != nil {
 		return 0, err
