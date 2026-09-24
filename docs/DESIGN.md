@@ -22,12 +22,15 @@ This document covers how Kosh stays correct. The README covers what it does, and
 | `outbox` | one row per state change, `UNIQUE (aggregate_id, aggregate_version)` | payments |
 | `webhook_deliveries` | one row per (event, merchant), with retry state | dispatcher |
 | `payouts` | one per merchant per settlement date, with its hold | worker |
+| `settlement_files`, `settlement_lines` | the bank's daily files, as received (checksummed) | recon |
+| `recon_results` | one result per line, plus one per item the bank never settled; the open non-matched ones are the exception queue | recon |
 
 ## Money flow
 
 | Event | Debit | Credit | Entry |
 | --- | --- | --- | --- |
-| Capture | `bank_receivable` amount | `merchant_payable` net, `fee_revenue` fee, `gst_payable` GST | posted |
+| Authorization (bank success) | `bank_receivable` amount | `unallocated_receipts` amount | posted |
+| Capture | `unallocated_receipts` amount | `merchant_payable` net, `fee_revenue` fee, `gst_payable` GST | posted |
 | Refund requested | `merchant_payable` amount | `bank_receivable` amount | **pending** hold |
 | Refund succeeded | (hold moves pending → posted) | | posted |
 | Refund failed or expired | (hold voided, pending totals released) | | voided |
@@ -36,6 +39,9 @@ This document covers how Kosh stays correct. The README covers what it does, and
 | Payout initiated (T+1) | `merchant_payable` eligible amount | `payout_clearing` | **pending** hold |
 | Payout confirmed by the bank | (hold posted) and `payout_clearing` | `bank_settlement` | posted |
 | Payout rejected | (hold voided; tomorrow's batch pays it) | | voided |
+| Bank settlement file reconciled (one entry per file) | `bank_settlement` net cash, `bank_charges` expected fees, `recon_suspense` shortfalls | `bank_receivable` expected gross, `recon_suspense` overpayments | posted |
+| Exception resolved: written off | `recon_writeoff` | `recon_suspense` (or `bank_receivable` for a missing item) | posted |
+| Exception resolved: bank corrected | `bank_settlement` | `recon_suspense` | posted |
 
 `merchant_payable` carries `DebitsMustNotExceedCredits`, which is checked against posted plus pending debits. A hold reserves money, and a refund the merchant can't cover is refused before the bank is ever called.
 
@@ -109,6 +115,47 @@ That nets out refunds and open holds, and leaves D+1's sales for tomorrow. The a
 
 The bank simulator publishes a settlement file per day (`GET /v1/settlements/{date}`) with seeded faults, ready for phase 5's reconciliation.
 
+## Reconciliation
+
+The worker fetches yesterday's settlement file, ingests it (the same file twice is a no-op; a different file for the same date is refused), and reconciles it in one transaction:
+
+1. Load the lines and every bank-confirmed payment or refund they could refer to, with whether each is already settled.
+2. Match each line by `bank_ref`, then by Kosh's id echoed in `reference`, and classify it:
+
+   | Status | When | Into `recon_suspense` |
+   | --- | --- | --- |
+   | `matched` | gross and fee agree | 0 |
+   | `fee_variance` | gross agrees, fee differs from `bank.Fee` | expected net − actual net |
+   | `amount_mismatch` | gross differs | expected net − actual net |
+   | `duplicate` | item already settled | −net (cash with no item) |
+   | `missing_in_ledger` | no item | −net |
+   | `missing_in_bank` | (no line) item confirmed before the file's date, never settled | 0; the receivable stays open |
+
+3. Post one `bank_settlement` entry for the file, and mark it reconciled.
+
+Invariant 10 then says: everything confirmed before the latest reconciled date has a result, every line has exactly one, and `recon_suspense` equals the sum of the open exceptions.
+
+## Simulation harness
+
+`sim.Run(seed)` builds a world on a fresh database: the payments service and recon engine on a fake clock and seeded ids, an in-process bank (`sim.Bank`) with seeded decisions and a callback queue, the in-memory bus, the dispatcher with seeded jitter, a receiver per merchant, and the worker. Then it runs 60 steps chosen by the seed's RNG:
+
+| Step | What it does |
+| --- | --- |
+| pay / retry | new order and payment; or resend any earlier request with its key, and require byte-identical bytes |
+| capture / refund / double_refund | on payments picked from the database in id order |
+| callbacks | deliver the bank's due callbacks (late; 0–3 copies) |
+| advance | move the clock 1 s to 8 h |
+| worker / events | a worker round (pollers, expiry, settlement, recon); relay, ingest and send |
+| merchant_flip / bank_mood | break or fix a webhook endpoint; change the bank's decline, timeout, pending and outage rates |
+| crash | arm a crashpoint and run the action that reaches it; on the panic, "restart" (fresh bus consumer, arms cleared) and let the client retry later |
+| resolve | resolve a random open exception |
+
+After every step, invariants 1–7 and 9–11 are checked against the fake clock. At the end the faults stop and the world drains for at least 50 simulated hours: every unanswered request is retried, callbacks delivered, payouts made, files reconciled, webhooks delivered (disabled merchants replay). Then all 11 invariants are checked, including 8.
+
+Determinism needed a few things: every `ORDER BY` has a unique tiebreak, crashpoints are armed per context (`crash.WithArms`) so parallel seeds don't trigger each other, and the bus is drained by checking its lag rather than polling with a timeout. `TestReplayIsDeterministic` runs one seed twice and compares trace hashes.
+
+To check the harness itself, four bugs were planted by hand (a refund failure that forgets to void its hold, recon never reporting missing items, a stored idempotent response that differs from the one returned, a late success with no auto refund). Each made between 9 and 39 of 40 seeds fail.
+
 ## Events and webhooks
 
 ```text
@@ -144,8 +191,9 @@ Retries back off exponentially from 10 s to a 1 h cap. Each delay is half fixed 
 - Each database test ends with `invariants.Check`, which runs all the SQL rules.
 - The e2e test builds the real binaries, runs them against Redpanda, kills them, and checks that nothing was lost.
 
-## Known gaps (after phase 4)
+## Known gaps (after phase 5)
 
-- No reconciliation yet. Settlement files are produced but not read. A bank success after Kosh gave up, or a failed auto refund, is not surfaced until phase 5's exception queue. `bank_settlement` records payouts but not incoming cash.
-- Invariant 10 comes with recon.
+- The exception queue has no alerting or SLA, and failed auto refunds are not retried.
+- Authorizations that are never captured stay in `unallocated_receipts`; gateways auto-refund them after a few days.
+- The simulation runs one goroutine. Concurrency is covered by `-race` tests and `TestBankChaos`, which are not replayable step by step.
 - The hot system accounts are measured but not yet fixed (ADR 0003).
