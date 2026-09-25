@@ -11,8 +11,11 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/naman777/kosh/internal/bank"
 	"github.com/naman777/kosh/internal/clock"
+	"github.com/naman777/kosh/internal/metrics"
 	"github.com/naman777/kosh/internal/payments"
 	"github.com/naman777/kosh/internal/recon"
 )
@@ -22,6 +25,8 @@ type Worker struct {
 	Svc   *payments.Service
 	Clock clock.Clock
 	Log   *slog.Logger
+	// Pool, when set, lets the worker publish state gauges.
+	Pool *pgxpool.Pool
 	// Recon and Settlements enable daily reconciliation; nil skips it.
 	Recon       *recon.Engine
 	Settlements bank.SettlementSource
@@ -92,7 +97,40 @@ func (w *Worker) RunOnce(ctx context.Context) (Stats, error) {
 			w.lastSettlementOK = day
 		}
 	}
+	metrics.PollResolved.WithLabelValues("payment").Add(float64(st.Payments))
+	metrics.PollResolved.WithLabelValues("refund").Add(float64(st.Refunds))
+	metrics.PollResolved.WithLabelValues("payout").Add(float64(st.Payouts))
+	metrics.PollResolved.WithLabelValues("expired_hold").Add(float64(st.Expired))
+	w.gauges(ctx)
 	return st, errors.Join(errs...)
+}
+
+// gauges refreshes the worker's state gauges.
+func (w *Worker) gauges(ctx context.Context) {
+	if w.Pool == nil {
+		return
+	}
+	for _, s := range []payments.State{payments.StateCreated, payments.StatePending, payments.StateAuthorized,
+		payments.StateCaptured, payments.StateFailed, payments.StateRefunded} {
+		metrics.Payments.WithLabelValues(string(s)).Set(0)
+	}
+	rows, err := w.Pool.Query(ctx, `SELECT state, count(*) FROM payments GROUP BY state`)
+	if err == nil {
+		for rows.Next() {
+			var (
+				state string
+				n     float64
+			)
+			if rows.Scan(&state, &n) == nil {
+				metrics.Payments.WithLabelValues(state).Set(n)
+			}
+		}
+		rows.Close()
+	}
+	var open float64
+	if w.Pool.QueryRow(ctx, `SELECT count(*) FROM recon_results WHERE status <> 'matched' AND resolved_at IS NULL`).Scan(&open) == nil {
+		metrics.ReconOpenExceptions.Set(open)
+	}
 }
 
 // Run loops until ctx ends, pausing interval between rounds. Errors are

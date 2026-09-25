@@ -3,6 +3,7 @@
 //	KOSH_DATABASE_URL    Postgres URL (default: the compose database)
 //	KOSH_KAFKA_BROKERS   comma-separated brokers (default localhost:19092)
 //	KOSH_KAFKA_TOPIC     topic (default kosh.events)
+//	KOSH_METRICS_ADDR    /metrics listen address (default :9101)
 //	KOSH_CRASHPOINT      crash at a named point, for failure tests
 package main
 
@@ -19,6 +20,7 @@ import (
 	"github.com/naman777/kosh/internal/clock"
 	"github.com/naman777/kosh/internal/db"
 	"github.com/naman777/kosh/internal/env"
+	"github.com/naman777/kosh/internal/metrics"
 	"github.com/naman777/kosh/internal/outbox"
 )
 
@@ -70,6 +72,11 @@ func run(log *slog.Logger) error {
 		}
 	}()
 
+	metrics.DBGauge(pool, "kosh_outbox_unpublished", "Outbox rows not yet published.",
+		`SELECT count(*) FROM outbox WHERE published_at IS NULL`)
+	metrics.DBGauge(pool, "kosh_outbox_oldest_seconds", "Age of the oldest unpublished outbox row.",
+		`SELECT COALESCE(EXTRACT(EPOCH FROM now() - min(created_at)), 0) FROM outbox WHERE published_at IS NULL`)
+	metrics.Serve(env.String("KOSH_METRICS_ADDR", ":9101"), log)
 	log.Info("relay running", "brokers", brokers, "topic", topic)
 	r := &outbox.Relay{Pool: pool, Publisher: pub, Clock: clock.Real{}}
 	return r.Run(ctx)

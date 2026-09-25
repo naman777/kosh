@@ -19,6 +19,7 @@ import (
 	"github.com/naman777/kosh/internal/bus"
 	"github.com/naman777/kosh/internal/clock"
 	"github.com/naman777/kosh/internal/crash"
+	"github.com/naman777/kosh/internal/metrics"
 	"github.com/naman777/kosh/internal/outbox"
 	"github.com/naman777/kosh/internal/rng"
 )
@@ -183,6 +184,7 @@ type claimed struct {
 	url        string
 	secret     string
 	body       []byte
+	createdAt  time.Time
 }
 
 // SendOnce claims due deliveries, sends them, and records the results. It
@@ -265,6 +267,7 @@ func (d *Dispatcher) claim(ctx context.Context) ([]claimed, error) {
 				return err
 			}
 			env.ID, env.MerchantID, env.Data = outbox.EventID(c.eventID), c.merchantID, payload
+			c.createdAt = env.CreatedAt
 			if c.body, err = json.Marshal(env); err != nil {
 				rows.Close()
 				return err
@@ -292,6 +295,8 @@ func (d *Dispatcher) record(ctx context.Context, c claimed, status int, sendErr 
 	now := d.Clock.Now()
 	return pgx.BeginFunc(ctx, d.Pool, func(tx pgx.Tx) error {
 		if sendErr == nil && status >= 200 && status < 300 {
+			metrics.WebhookAttempts.WithLabelValues("delivered").Inc()
+			metrics.WebhookDelivery.Observe(now.Sub(c.createdAt).Seconds())
 			if _, err := tx.Exec(ctx, `
 				UPDATE webhook_deliveries
 				SET delivered_at = $3, next_attempt_at = NULL, last_status = $4, last_error = NULL
@@ -303,6 +308,7 @@ func (d *Dispatcher) record(ctx context.Context, c claimed, status int, sendErr 
 			return err
 		}
 
+		metrics.WebhookAttempts.WithLabelValues("failed").Inc()
 		var lastErr *string
 		if sendErr != nil {
 			s := sendErr.Error()

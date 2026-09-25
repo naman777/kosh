@@ -8,6 +8,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/naman777/kosh/internal/metrics"
 )
 
 // Post records e as a posted entry inside tx.
@@ -25,6 +27,7 @@ func (l *Ledger) Hold(ctx context.Context, tx pgx.Tx, e Entry, expiresAt time.Ti
 }
 
 func (l *Ledger) write(ctx context.Context, tx pgx.Tx, e Entry, state string, expiresAt *time.Time) error {
+	defer metrics.Since(metrics.LedgerPost, time.Now())
 	deltas, err := validate(e)
 	if err != nil {
 		return err
@@ -77,6 +80,7 @@ func (l *Ledger) write(ctx context.Context, tx pgx.Tx, e Entry, state string, ex
 func (l *Ledger) lockAndApply(ctx context.Context, tx pgx.Tx, deltas map[AccountID]delta,
 	next func(Balances, delta) (Balances, error), checkLimits bool) error {
 	ids := sortedIDs(deltas)
+	lockStart := time.Now()
 	rows, err := tx.Query(ctx, `
 		SELECT id, flags, posted_dr, posted_cr, pending_dr, pending_cr
 		FROM accounts WHERE id = ANY($1)
@@ -86,6 +90,7 @@ func (l *Ledger) lockAndApply(ctx context.Context, tx pgx.Tx, deltas map[Account
 		return fmt.Errorf("ledger: lock accounts: %w", err)
 	}
 	defer rows.Close()
+	locked := false
 
 	found := 0
 	for rows.Next() {
@@ -96,6 +101,11 @@ func (l *Ledger) lockAndApply(ctx context.Context, tx pgx.Tx, deltas map[Account
 		)
 		if err := rows.Scan(&id, &flags, &b.PostedDr, &b.PostedCr, &b.PendingDr, &b.PendingCr); err != nil {
 			return err
+		}
+		if !locked {
+			// The first row arrives once every lock is held.
+			metrics.Since(metrics.LedgerLockWait, lockStart)
+			locked = true
 		}
 		found++
 		after, err := next(b, deltas[id])

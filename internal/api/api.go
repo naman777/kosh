@@ -18,6 +18,7 @@ import (
 
 	"github.com/naman777/kosh/internal/bank"
 	"github.com/naman777/kosh/internal/idempotency"
+	"github.com/naman777/kosh/internal/metrics"
 	"github.com/naman777/kosh/internal/payments"
 	"github.com/naman777/kosh/internal/recon"
 )
@@ -52,6 +53,7 @@ func New(svc *payments.Service, cfg Config, log *slog.Logger) *Server {
 	s := &Server{svc: svc, cfg: cfg, log: log, mux: http.NewServeMux()}
 
 	s.mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok\n")) })
+	s.mux.Handle("GET /metrics", metrics.Handler())
 	s.mux.HandleFunc("POST /admin/merchants", s.admin(s.createMerchant))
 	s.mux.HandleFunc("POST /admin/settlements/run", s.admin(s.runSettlement))
 	s.mux.HandleFunc("POST /bank/callbacks", s.bankCallback)
@@ -109,8 +111,28 @@ func New(svc *payments.Service, cfg Config, log *slog.Logger) *Server {
 	return s
 }
 
-// ServeHTTP implements http.Handler.
-func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.ServeHTTP(w, r) }
+// ServeHTTP implements http.Handler, timing every request by its route
+// pattern (not its raw path, so ids don't explode the label set).
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	rec := &statusRecorder{ResponseWriter: w, code: http.StatusOK}
+	s.mux.ServeHTTP(rec, r)
+	route := r.Pattern
+	if route == "" {
+		route = "unmatched"
+	}
+	metrics.HTTPRequest.WithLabelValues(route, metrics.Code(rec.code)).Observe(time.Since(start).Seconds())
+}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	code int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.code = code
+	r.ResponseWriter.WriteHeader(code)
+}
 
 func notFound() *payments.Error {
 	return &payments.Error{Status: http.StatusNotFound, Code: "not_found", Message: "not found"}

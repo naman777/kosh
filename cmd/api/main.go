@@ -24,6 +24,7 @@ import (
 	"github.com/naman777/kosh/internal/db"
 	"github.com/naman777/kosh/internal/env"
 	"github.com/naman777/kosh/internal/ids"
+	"github.com/naman777/kosh/internal/metrics"
 	"github.com/naman777/kosh/internal/payments"
 	"github.com/naman777/kosh/internal/recon"
 )
@@ -52,7 +53,7 @@ func run(log *slog.Logger) error {
 	cfg := payments.DefaultConfig()
 	cfg.BankTimeout = env.Duration("KOSH_BANK_TIMEOUT", cfg.BankTimeout)
 	bc := bank.NewHTTPClient(env.String("KOSH_BANK_URL", "http://localhost:8091"))
-	svc, err := payments.New(ctx, payments.Deps{Pool: pool, Bank: bc, Config: cfg})
+	svc, err := payments.New(ctx, payments.Deps{Pool: pool, Bank: metrics.Bank{Inner: bc}, Config: cfg})
 	if err != nil {
 		return err
 	}

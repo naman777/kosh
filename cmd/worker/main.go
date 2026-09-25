@@ -5,6 +5,7 @@
 //	KOSH_DATABASE_URL    Postgres URL (default: the compose database)
 //	KOSH_BANK_URL        bank simulator URL (default http://localhost:8091)
 //	KOSH_WORKER_INTERVAL pause between rounds (default 1s)
+//	KOSH_METRICS_ADDR    /metrics listen address (default :9103)
 //	KOSH_CRASHPOINT      crash at a named point, for failure tests
 package main
 
@@ -22,6 +23,7 @@ import (
 	"github.com/naman777/kosh/internal/db"
 	"github.com/naman777/kosh/internal/env"
 	"github.com/naman777/kosh/internal/ids"
+	"github.com/naman777/kosh/internal/metrics"
 	"github.com/naman777/kosh/internal/payments"
 	"github.com/naman777/kosh/internal/recon"
 	"github.com/naman777/kosh/internal/worker"
@@ -48,7 +50,7 @@ func run(log *slog.Logger) error {
 		return err
 	}
 	bc := bank.NewHTTPClient(env.String("KOSH_BANK_URL", "http://localhost:8091"))
-	svc, err := payments.New(ctx, payments.Deps{Pool: pool, Bank: bc})
+	svc, err := payments.New(ctx, payments.Deps{Pool: pool, Bank: metrics.Bank{Inner: bc}})
 	if err != nil {
 		return err
 	}
@@ -56,7 +58,8 @@ func run(log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	w := &worker.Worker{Svc: svc, Clock: clock.Real{}, Log: log, Recon: rec, Settlements: bc}
+	w := &worker.Worker{Svc: svc, Clock: clock.Real{}, Log: log, Recon: rec, Settlements: bc, Pool: pool}
+	metrics.Serve(env.String("KOSH_METRICS_ADDR", ":9103"), log)
 	log.Info("worker running")
 	return w.Run(ctx, env.Duration("KOSH_WORKER_INTERVAL", time.Second))
 }

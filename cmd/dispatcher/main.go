@@ -5,6 +5,7 @@
 //	KOSH_KAFKA_TOPIC            topic (default kosh.events)
 //	KOSH_DISPATCH_GROUP         consumer group (default kosh-dispatcher)
 //	KOSH_WEBHOOK_SEND_TIMEOUT   per-attempt timeout (default 10s)
+//	KOSH_METRICS_ADDR           /metrics listen address (default :9102)
 //	KOSH_CRASHPOINT             crash at a named point, for failure tests
 package main
 
@@ -22,6 +23,7 @@ import (
 	"github.com/naman777/kosh/internal/clock"
 	"github.com/naman777/kosh/internal/db"
 	"github.com/naman777/kosh/internal/env"
+	"github.com/naman777/kosh/internal/metrics"
 	"github.com/naman777/kosh/internal/rng"
 	"github.com/naman777/kosh/internal/webhooks"
 )
@@ -67,6 +69,10 @@ func run(log *slog.Logger) error {
 		SendTimeout: timeout,
 	}
 
+	metrics.DBGauge(pool, "kosh_webhook_backlog", "Webhook deliveries not yet delivered to enabled merchants.",
+		`SELECT count(*) FROM webhook_deliveries d JOIN merchants m ON m.id = d.merchant_id
+		 WHERE d.delivered_at IS NULL AND m.webhook_disabled_at IS NULL`)
+	metrics.Serve(env.String("KOSH_METRICS_ADDR", ":9102"), log)
 	errc := make(chan error, 2)
 	go func() { errc <- d.RunIngest(ctx, consumer) }()
 	go func() { errc <- d.RunSender(ctx, 100*time.Millisecond) }()
