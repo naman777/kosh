@@ -254,11 +254,61 @@ The file builder moves out of the banksim server into `banksim.BuildSettlement(r
 
 **Done when** 10,000 seeds pass all 11 invariants and recon classifies the injected faults (≥ 98%).
 
-## Phase 6 (planned in detail later)
+## Phase 6 · Load, observability, launch (build plan week 6) → Gate 2
 
-- **Phase 6 · Load, observability, launch:** k6 scenarios, Prometheus/Grafana, the Next.js failure lab, GCP deploy, README numbers, demo video.
+Lessons so far: the most interesting number (captures serialize on three shared accounts) came from measuring, not reasoning. So this phase measures first, fixes the hot accounts with numbers before and after, and builds the demo around faults you can see happen.
 
-Each gets its own detailed section here when it starts.
+### 6.1 Metrics (`internal/metrics`, Prometheus client)
+
+Every binary serves `/metrics`: the API on its own port, the others on `:9101`–`:9104`. Each one has only the metrics it owns:
+
+| Metric | Type | Where |
+| --- | --- | --- |
+| `kosh_http_request_seconds{route,code}` | histogram | api |
+| `kosh_bank_call_seconds{op,outcome}` | histogram | api, worker |
+| `kosh_ledger_post_seconds`, `kosh_ledger_lock_wait_seconds` | histogram | wherever the ledger runs |
+| `kosh_outbox_unpublished`, `kosh_outbox_oldest_seconds` | gauge | relay |
+| `kosh_webhook_backlog`, `kosh_webhook_delivery_seconds` (event created → delivered) | gauge, histogram | dispatcher |
+| `kosh_poll_resolved_total{kind}`, `kosh_recon_open_exceptions`, `kosh_payments{state}` | counter, gauge | worker |
+
+Prometheus and Grafana join the compose file with a provisioned data source and dashboard (`deploy/grafana/`).
+
+### 6.2 Containers
+
+- A multi-stage `Dockerfile` builds every binary into one small image.
+- `docker-compose.yml` gains a `stack` profile running the whole system: api, worker, relay, dispatcher, banksim, samplemerchant, Prometheus and Grafana. This is the same setup the VM runs.
+
+### 6.3 Load tests (`loadtest/`, k6 in Docker)
+
+- `steady.js`: order → pay → capture at a fixed arrival rate, spread over 50 merchants.
+- `hot.js`: the same, all on one merchant.
+- `fanout.js`: 20 merchants with webhook URLs, each sale producing several events; webhook delivery p99 comes from `kosh_webhook_delivery_seconds`.
+- Each run records p50/p99, throughput, errors and Postgres lock waits, with the hardware, in `loadtest/RESULTS.md`.
+
+### 6.4 Hot accounts (ADR 0003's fix)
+
+- `accounts.shard` (`UNIQUE (code, owner_id, shard)`). System accounts touched by every payment (`bank_receivable`, `unallocated_receipts`, `fee_revenue`, `gst_payable`) get N shards (default 16). The shard is picked from the payment id, so a payment's authorization, capture, refunds, late success and recon all hit the same shard.
+- `ledger.SystemBalance(code)` sums the shards for reports and tests.
+- Benchmarked before and after, with `ledgerbench -mode capture` and the k6 steady run.
+- The one-hot-merchant case can't be sharded without breaking "never negative", so it stays a published baseline with the options discussed (ADR 0003).
+
+### 6.5 Failure lab
+
+- `cmd/lab`: a supervisor that runs api, worker, relay, dispatcher, banksim and samplemerchant as child processes, plus a built-in traffic generator. Its HTTP API can kill or start any process, change the bank's mood (late, outage, decline rate), black-hole the merchant endpoint, start or stop traffic, and report live state: ledger totals (debits = credits), payments by state, outbox lag, webhook backlog, open recon exceptions, and the latest invariant check.
+- `dashboard/` (Next.js): one page that polls the lab every second. Buttons on the left, live totals and charts on the right, and a red banner if any invariant ever fails.
+
+### 6.6 Deploy (GCP VM)
+
+- `deploy/`: the compose stack plus Caddy for HTTPS, a `deploy.sh` that builds and starts it on a VM over SSH, and a README with the `gcloud` commands to create the VM. Running it needs your GCP project, so that step is yours (or give me access).
+
+### 6.7 Launch (Gate 2)
+
+- README: final numbers with hardware, the hot-account before/after, the soak result, a "where it breaks" section, and a link to the failure lab.
+- `docs/DEMO.md`: a shot list for the 2-minute video (one payment's journal entries through one injected failure).
+- `progress.md`: the resume line with the measured numbers filled in.
+- Make the repo public when you decide to.
+
+**Done when** the load numbers and the hot-account before/after are published, the failure lab runs locally with one command, and the deploy is ready to run on a VM.
 
 ## Working agreement
 
