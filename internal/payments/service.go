@@ -47,6 +47,9 @@ type Config struct {
 	// RefundPendingTimeout is the same for refunds and payouts. It must be
 	// shorter than their hold TTLs, so the poller decides before expiry does.
 	RefundPendingTimeout time.Duration
+	// SystemShards is how many shards the hot system accounts get when the
+	// database is first set up (0: ledger.DefaultShards). Fixed after that.
+	SystemShards int
 }
 
 // DefaultConfig matches the build plan: a 30 s bank timeout.
@@ -97,7 +100,7 @@ type Service struct {
 	cfg    Config
 	ledger *ledger.Ledger
 	idem   *idempotency.Store
-	sys    map[string]ledger.AccountID
+	chart  *ledger.Chart
 }
 
 // New builds a Service and makes sure the system accounts exist.
@@ -110,13 +113,13 @@ func New(ctx context.Context, d Deps) (*Service, error) {
 	}
 	d.Config = d.Config.withDefaults()
 	l := ledger.New(d.Clock)
-	sys, err := l.EnsureSystemAccounts(ctx, d.Pool)
+	chart, err := l.EnsureChart(ctx, d.Pool, d.Config.SystemShards)
 	if err != nil {
 		return nil, err
 	}
 	return &Service{
 		pool: d.Pool, bank: d.Bank, clock: d.Clock, ids: d.IDs, cfg: d.Config,
-		ledger: l, idem: idempotency.NewStore(d.Clock, d.IDs), sys: sys,
+		ledger: l, idem: idempotency.NewStore(d.Clock, d.IDs), chart: chart,
 	}, nil
 }
 

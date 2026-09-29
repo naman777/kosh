@@ -192,7 +192,7 @@ func (s *Service) createPayout(ctx context.Context, merchantID uuid.UUID, day st
 		id, holdID := s.ids.New(), s.ids.New()
 		if err := s.ledger.Hold(ctx, tx, ledger.Entry{ID: holdID, Kind: "payout", RefID: id, Postings: []ledger.Posting{
 			{Account: payable, Side: ledger.Debit, Amount: eligible},
-			{Account: s.sys[ledger.PayoutClearing], Side: ledger.Credit, Amount: eligible},
+			{Account: s.chart.One(ledger.PayoutClearing), Side: ledger.Credit, Amount: eligible},
 		}}, now.Add(s.cfg.PayoutHoldTTL)); err != nil {
 			return err
 		}
@@ -253,8 +253,8 @@ func (s *Service) resolvePayout(ctx context.Context, tx pgx.Tx, id uuid.UUID, re
 			return Payout{}, fmt.Errorf("payments: commit payout hold: %w", err)
 		}
 		if err := s.ledger.Post(ctx, tx, ledger.Entry{ID: s.ids.New(), Kind: "payout_sent", RefID: p.ID, Postings: []ledger.Posting{
-			{Account: s.sys[ledger.PayoutClearing], Side: ledger.Debit, Amount: p.Amount},
-			{Account: s.sys[ledger.BankSettlement], Side: ledger.Credit, Amount: p.Amount},
+			{Account: s.chart.One(ledger.PayoutClearing), Side: ledger.Debit, Amount: p.Amount},
+			{Account: s.chart.One(ledger.BankSettlement), Side: ledger.Credit, Amount: p.Amount},
 		}}); err != nil {
 			return Payout{}, err
 		}

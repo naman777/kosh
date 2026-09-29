@@ -66,8 +66,8 @@ func (s *Service) applyPaymentResult(ctx context.Context, tx pgx.Tx, id uuid.UUI
 // payment the bank collected, captured or not.
 func (s *Service) postAuthorization(ctx context.Context, tx pgx.Tx, p Payment) error {
 	return s.ledger.Post(ctx, tx, ledger.Entry{ID: s.ids.New(), Kind: "authorization", RefID: p.ID, Postings: []ledger.Posting{
-		{Account: s.sys[ledger.BankReceivable], Side: ledger.Debit, Amount: p.Amount},
-		{Account: s.sys[ledger.UnallocatedReceipts], Side: ledger.Credit, Amount: p.Amount},
+		{Account: s.chart.For(ledger.BankReceivable, p.ID), Side: ledger.Debit, Amount: p.Amount},
+		{Account: s.chart.For(ledger.UnallocatedReceipts, p.ID), Side: ledger.Credit, Amount: p.Amount},
 	}})
 }
 
@@ -94,7 +94,7 @@ func (s *Service) lateSuccess(ctx context.Context, tx pgx.Tx, p Payment, res ban
 	if err != nil {
 		return Payment{}, fmt.Errorf("payments: record late success: %w", err)
 	}
-	recv, owed := s.sys[ledger.BankReceivable], s.sys[ledger.CustomerRefundPayable]
+	recv, owed := s.chart.For(ledger.BankReceivable, p.ID), s.chart.One(ledger.CustomerRefundPayable)
 	if err := s.ledger.Post(ctx, tx, ledger.Entry{ID: s.ids.New(), Kind: "late_success", RefID: p.ID, Postings: []ledger.Posting{
 		{Account: recv, Side: ledger.Debit, Amount: p.Amount},
 		{Account: owed, Side: ledger.Credit, Amount: p.Amount},

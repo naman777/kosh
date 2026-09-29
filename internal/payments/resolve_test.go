@@ -44,11 +44,7 @@ func (e *env) pollRefunds() int {
 // system returns a system account's posted balance and pending debits.
 func (e *env) system(code string) ledger.Account {
 	e.t.Helper()
-	var id ledger.AccountID
-	if err := e.pool.QueryRow(e.ctx, `SELECT id FROM accounts WHERE code = $1 AND owner_id IS NULL`, code).Scan(&id); err != nil {
-		e.t.Fatal(err)
-	}
-	a, err := e.svc.Ledger().GetAccount(e.ctx, e.pool, id)
+	a, err := e.svc.Ledger().GetSystemAccount(e.ctx, e.pool, code)
 	if err != nil {
 		e.t.Fatal(err)
 	}

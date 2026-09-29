@@ -6,6 +6,7 @@
 //	KOSH_BANK_CALLBACK_SECRET  HMAC secret for /bank/callbacks (default: callbacks disabled)
 //	KOSH_ADDR           listen address (default :8090)
 //	KOSH_BANK_TIMEOUT   per-call bank timeout (default 30s)
+//	KOSH_SYSTEM_SHARDS  shards per hot system account in a new database (default 16)
 package main
 
 import (
@@ -52,6 +53,7 @@ func run(log *slog.Logger) error {
 
 	cfg := payments.DefaultConfig()
 	cfg.BankTimeout = env.Duration("KOSH_BANK_TIMEOUT", cfg.BankTimeout)
+	cfg.SystemShards = env.Int("KOSH_SYSTEM_SHARDS", 0)
 	bc := bank.NewHTTPClient(env.String("KOSH_BANK_URL", "http://localhost:8091"))
 	svc, err := payments.New(ctx, payments.Deps{Pool: pool, Bank: metrics.Bank{Inner: bc}, Config: cfg})
 	if err != nil {

@@ -165,7 +165,7 @@ func (s *Service) reserveRefund(ctx context.Context, tx pgx.Tx, merchantID, paym
 	now := s.clock.Now()
 	err = s.ledger.Hold(ctx, tx, ledger.Entry{ID: holdID, Kind: "refund", RefID: refundID, Postings: []ledger.Posting{
 		{Account: payable, Side: ledger.Debit, Amount: reserved},
-		{Account: s.sys[ledger.BankReceivable], Side: ledger.Credit, Amount: reserved},
+		{Account: s.chart.For(ledger.BankReceivable, paymentID), Side: ledger.Credit, Amount: reserved},
 	}}, now.Add(s.cfg.RefundHoldTTL))
 	if errors.Is(err, ledger.ErrInsufficientFunds) {
 		return uuid.Nil, errorf(http.StatusUnprocessableEntity, "insufficient_balance",

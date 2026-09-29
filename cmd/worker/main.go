@@ -50,7 +50,9 @@ func run(log *slog.Logger) error {
 		return err
 	}
 	bc := bank.NewHTTPClient(env.String("KOSH_BANK_URL", "http://localhost:8091"))
-	svc, err := payments.New(ctx, payments.Deps{Pool: pool, Bank: metrics.Bank{Inner: bc}})
+	cfg := payments.DefaultConfig()
+	cfg.SystemShards = env.Int("KOSH_SYSTEM_SHARDS", 0)
+	svc, err := payments.New(ctx, payments.Deps{Pool: pool, Bank: metrics.Bank{Inner: bc}, Config: cfg})
 	if err != nil {
 		return err
 	}

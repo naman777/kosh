@@ -48,6 +48,7 @@ type AccountSpec struct {
 	OwnerID uuid.NullUUID
 	Normal  NormalSide
 	Flags   Flags
+	Shard   int // 0 unless the account is sharded (see chart.go)
 }
 
 // SystemAccounts is the fixed part of the chart of accounts.
@@ -75,14 +76,14 @@ func MerchantPayableSpec(merchantID uuid.UUID) AccountSpec {
 }
 
 // EnsureAccount creates the account if it does not exist and returns its id.
-// It is idempotent: (code, owner) is unique.
+// It is idempotent: (code, owner, shard) is unique.
 func (l *Ledger) EnsureAccount(ctx context.Context, q Querier, s AccountSpec) (AccountID, error) {
 	var id AccountID
 	err := q.QueryRow(ctx, `
-		INSERT INTO accounts (code, owner_id, normal_side, flags)
-		VALUES ($1, $2, $3, $4)
+		INSERT INTO accounts (code, owner_id, normal_side, flags, shard)
+		VALUES ($1, $2, $3, $4, $5)
 		ON CONFLICT DO NOTHING
-		RETURNING id`, s.Code, s.OwnerID, string(s.Normal), int32(s.Flags)).Scan(&id)
+		RETURNING id`, s.Code, s.OwnerID, string(s.Normal), int32(s.Flags), s.Shard).Scan(&id)
 	if err == nil {
 		return id, nil
 	}
@@ -90,15 +91,16 @@ func (l *Ledger) EnsureAccount(ctx context.Context, q Querier, s AccountSpec) (A
 		return 0, fmt.Errorf("ledger: create account %s: %w", s.Code, err)
 	}
 	err = q.QueryRow(ctx, `
-		SELECT id FROM accounts WHERE code = $1 AND owner_id IS NOT DISTINCT FROM $2`,
-		s.Code, s.OwnerID).Scan(&id)
+		SELECT id FROM accounts WHERE code = $1 AND owner_id IS NOT DISTINCT FROM $2 AND shard = $3`,
+		s.Code, s.OwnerID, s.Shard).Scan(&id)
 	if err != nil {
 		return 0, fmt.Errorf("ledger: find account %s: %w", s.Code, err)
 	}
 	return id, nil
 }
 
-// EnsureSystemAccounts creates the system accounts and returns their ids by code.
+// EnsureSystemAccounts creates shard 0 of every system account and returns
+// their ids by code. Services use EnsureChart, which knows about shards.
 func (l *Ledger) EnsureSystemAccounts(ctx context.Context, q Querier) (map[string]AccountID, error) {
 	out := make(map[string]AccountID, len(SystemAccounts))
 	for _, s := range SystemAccounts {

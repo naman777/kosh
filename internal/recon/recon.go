@@ -74,17 +74,17 @@ type Engine struct {
 	clock  clock.Clock
 	ids    ids.Generator
 	ledger *ledger.Ledger
-	sys    map[string]ledger.AccountID
+	chart  *ledger.Chart
 }
 
 // New builds an Engine and makes sure the system accounts exist.
 func New(ctx context.Context, pool *pgxpool.Pool, c clock.Clock, g ids.Generator) (*Engine, error) {
 	l := ledger.New(c)
-	sys, err := l.EnsureSystemAccounts(ctx, pool)
+	chart, err := l.EnsureChart(ctx, pool, 0)
 	if err != nil {
 		return nil, err
 	}
-	return &Engine{pool: pool, clock: c, ids: g, ledger: l, sys: sys}, nil
+	return &Engine{pool: pool, clock: c, ids: g, ledger: l, chart: chart}, nil
 }
 
 // Ingest parses and stores the settlement file for business date
@@ -137,6 +137,7 @@ func (e *Engine) Ingest(ctx context.Context, date string, raw []byte) (uuid.UUID
 type item struct {
 	kind        string
 	id          uuid.UUID
+	paymentID   uuid.UUID // picks the receivable shard
 	bankRef     string
 	gross       money.Paise
 	expectedFee money.Paise
@@ -206,7 +207,7 @@ func (e *Engine) reconcile(ctx context.Context, tx pgx.Tx, fileID uuid.UUID, dat
 	}
 
 	deltas := map[ledger.AccountID]money.Paise{}
-	add := func(code string, v money.Paise) { deltas[e.sys[code]] += v }
+	add := func(code string, v money.Paise) { deltas[e.chart.One(code)] += v }
 	var results []result
 	for i := range lines {
 		l := &lines[i]
@@ -242,7 +243,7 @@ func (e *Engine) reconcile(ctx context.Context, tx pgx.Tx, fileID uuid.UUID, dat
 			if it.writtenOff {
 				add(ledger.ReconWriteoff, -it.gross)
 			} else {
-				add(ledger.BankReceivable, -it.gross)
+				deltas[e.chart.For(ledger.BankReceivable, it.paymentID)] -= it.gross
 			}
 			add(ledger.BankCharges, it.expectedFee)
 		}
@@ -293,7 +294,7 @@ func (e *Engine) reconcile(ctx context.Context, tx pgx.Tx, fileID uuid.UUID, dat
 		return err
 	}
 	rep.Lines = len(lines)
-	rep.Cash = deltas[e.sys[ledger.BankSettlement]]
+	rep.Cash = deltas[e.chart.One(ledger.BankSettlement)]
 	for _, r := range append(results, missingResults...) {
 		rep.ByStatus[r.status]++
 	}
@@ -346,13 +347,13 @@ func loadLines(ctx context.Context, tx pgx.Tx, fileID uuid.UUID) ([]banksim.Line
 // state. %s is a filter on x (id, bank_ref, confirmed).
 const itemsSQL = `
 WITH x AS (
-  SELECT 'payment' AS kind, id, bank_ref, amount AS gross, method, bank_confirmed_at AS confirmed
+  SELECT 'payment' AS kind, id, id AS payment_id, bank_ref, amount AS gross, method, bank_confirmed_at AS confirmed
   FROM payments WHERE bank_ref IS NOT NULL
   UNION ALL
-  SELECT 'refund', id, bank_ref, -amount, '', bank_confirmed_at
+  SELECT 'refund', id, payment_id, bank_ref, -amount, '', bank_confirmed_at
   FROM refunds WHERE bank_ref IS NOT NULL
 )
-SELECT x.kind, x.id, x.bank_ref, x.gross, x.method,
+SELECT x.kind, x.id, x.payment_id, x.bank_ref, x.gross, x.method,
        EXISTS (SELECT 1 FROM recon_results r WHERE r.item_kind = x.kind AND r.item_id = x.id
                AND r.status IN ('matched', 'fee_variance', 'amount_mismatch')) AS settled,
        EXISTS (SELECT 1 FROM recon_results r WHERE r.item_kind = x.kind AND r.item_id = x.id
@@ -374,7 +375,7 @@ func (e *Engine) loadItems(ctx context.Context, tx pgx.Tx, filter string, args .
 			it     item
 			method string
 		)
-		if err := rows.Scan(&it.kind, &it.id, &it.bankRef, &it.gross, &method, &it.settled, &it.writtenOff, &it.missingOpen); err != nil {
+		if err := rows.Scan(&it.kind, &it.id, &it.paymentID, &it.bankRef, &it.gross, &method, &it.settled, &it.writtenOff, &it.missingOpen); err != nil {
 			return nil, nil, err
 		}
 		if it.kind == "payment" {

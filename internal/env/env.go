@@ -3,6 +3,7 @@ package env
 
 import (
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -20,6 +21,16 @@ func Duration(key string, def time.Duration) time.Duration {
 	if v := os.Getenv(key); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			return d
+		}
+	}
+	return def
+}
+
+// Int parses the variable or returns def.
+func Int(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
 		}
 	}
 	return def

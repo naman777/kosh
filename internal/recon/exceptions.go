@@ -84,14 +84,21 @@ func (e *Engine) Resolve(ctx context.Context, id int64, action string) (Result, 
 		deltas := map[ledger.AccountID]money.Paise{}
 		switch {
 		case r.Status == MissingInBank && action == WriteOff:
-			deltas[e.sys[ledger.ReconWriteoff]] += *r.ExpectedGross
-			deltas[e.sys[ledger.BankReceivable]] -= *r.ExpectedGross
+			// Write off the receivable on the shard the item's payment used.
+			paymentID := *r.ItemID
+			if *r.ItemKind == "refund" {
+				if err := tx.QueryRow(ctx, `SELECT payment_id FROM refunds WHERE id = $1`, paymentID).Scan(&paymentID); err != nil {
+					return err
+				}
+			}
+			deltas[e.chart.One(ledger.ReconWriteoff)] += *r.ExpectedGross
+			deltas[e.chart.For(ledger.BankReceivable, paymentID)] -= *r.ExpectedGross
 		case r.Status != MissingInBank && action == WriteOff:
-			deltas[e.sys[ledger.ReconWriteoff]] += r.Suspense
-			deltas[e.sys[ledger.ReconSuspense]] -= r.Suspense
+			deltas[e.chart.One(ledger.ReconWriteoff)] += r.Suspense
+			deltas[e.chart.One(ledger.ReconSuspense)] -= r.Suspense
 		case r.Status != MissingInBank && action == BankCorrected:
-			deltas[e.sys[ledger.BankSettlement]] += r.Suspense
-			deltas[e.sys[ledger.ReconSuspense]] -= r.Suspense
+			deltas[e.chart.One(ledger.BankSettlement)] += r.Suspense
+			deltas[e.chart.One(ledger.ReconSuspense)] -= r.Suspense
 		default:
 			return ErrBadResolution
 		}

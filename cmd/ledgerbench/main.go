@@ -4,7 +4,8 @@
 //
 //	go run ./cmd/ledgerbench -mode spread    # random pairs of 1,000 accounts: no shared rows, the ceiling
 //	go run ./cmd/ledgerbench -mode hot       # every transfer credits one merchant
-//	go run ./cmd/ledgerbench -mode capture   # real capture shape: bank_receivable, merchant, fee, GST
+//	go run ./cmd/ledgerbench -mode capture   # real capture shape: unallocated_receipts, merchant, fee, GST
+//	go run ./cmd/ledgerbench -mode capture -shards 16   # the same with sharded system accounts
 //
 // KOSH_TEST_DATABASE_URL is the admin connection (default: compose Postgres).
 package main
@@ -35,6 +36,7 @@ func main() {
 	duration := flag.Duration("duration", 15*time.Second, "how long to run")
 	accounts := flag.Int("accounts", 1000, "accounts to spread transfers over")
 	mode := flag.String("mode", "spread", "spread | hot | capture")
+	shards := flag.Int("shards", 1, "shards per hot system account (capture mode)")
 	flag.Parse()
 
 	ctx := context.Background()
@@ -43,7 +45,7 @@ func main() {
 	defer scratch.Drop()
 	pool := scratch.Pool
 	l := ledger.New(clock.Real{})
-	sys, err := l.EnsureSystemAccounts(ctx, pool)
+	chart, err := l.EnsureChart(ctx, pool, *shards)
 	check(err)
 	// Wallets have no balance limit, so random transfers never fail.
 	wallets := make([]ledger.AccountID, *accounts)
@@ -63,12 +65,14 @@ func main() {
 				{Account: merchants[0], Side: ledger.Credit, Amount: amt},
 			}
 		case "capture":
+			// The real capture entry, on the shard of a random payment id.
 			b, _ := money.Fees(amt+10_000, 200) // ≥ ₹100, so fee and GST are never zero
+			pid := uuid.New()
 			return []ledger.Posting{
-				{Account: sys[ledger.BankReceivable], Side: ledger.Debit, Amount: b.Amount},
+				{Account: chart.For(ledger.UnallocatedReceipts, pid), Side: ledger.Debit, Amount: b.Amount},
 				{Account: merchants[r.IntN(len(merchants))], Side: ledger.Credit, Amount: b.Net},
-				{Account: sys[ledger.FeeRevenue], Side: ledger.Credit, Amount: b.Fee},
-				{Account: sys[ledger.GSTPayable], Side: ledger.Credit, Amount: b.GST},
+				{Account: chart.For(ledger.FeeRevenue, pid), Side: ledger.Credit, Amount: b.Fee},
+				{Account: chart.For(ledger.GSTPayable, pid), Side: ledger.Credit, Amount: b.GST},
 			}
 		default:
 			from := r.IntN(len(wallets))
@@ -117,7 +121,7 @@ func main() {
 	check(err)
 	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
 	pct := func(p float64) time.Duration { return latencies[int(float64(len(latencies)-1)*p)] }
-	fmt.Printf("ledger transfers, mode=%s, %d workers, %d accounts, %s\n", *mode, *workers, *accounts, *duration)
+	fmt.Printf("ledger transfers, mode=%s, %d workers, %d accounts, %d shards, %s\n", *mode, *workers, *accounts, chart.Shards(), *duration)
 	fmt.Printf("  transfers   %d\n", ops.Load())
 	fmt.Printf("  throughput  %.0f transfers/s\n", float64(ops.Load())/duration.Seconds())
 	fmt.Printf("  latency     p50 %.2f ms  p99 %.2f ms  max %.2f ms\n", ms(pct(0.5)), ms(pct(0.99)), ms(pct(1)))

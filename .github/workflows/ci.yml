@@ -26,8 +26,8 @@ jobs:
       KOSH_TEST_DATABASE_URL: postgres://kosh:kosh@localhost:5442/postgres?sslmode=disable
       KOSH_KAFKA_BROKERS: localhost:19092
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
       - name: start redpanda

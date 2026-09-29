@@ -155,10 +155,10 @@ func (s *Service) postCapture(ctx context.Context, tx pgx.Tx, p Payment) error {
 		return err
 	}
 	postings := []ledger.Posting{
-		{Account: s.sys[ledger.UnallocatedReceipts], Side: ledger.Debit, Amount: b.Amount},
+		{Account: s.chart.For(ledger.UnallocatedReceipts, p.ID), Side: ledger.Debit, Amount: b.Amount},
 		{Account: payable, Side: ledger.Credit, Amount: b.Net},
-		{Account: s.sys[ledger.FeeRevenue], Side: ledger.Credit, Amount: b.Fee},
-		{Account: s.sys[ledger.GSTPayable], Side: ledger.Credit, Amount: b.GST},
+		{Account: s.chart.For(ledger.FeeRevenue, p.ID), Side: ledger.Credit, Amount: b.Fee},
+		{Account: s.chart.For(ledger.GSTPayable, p.ID), Side: ledger.Credit, Amount: b.GST},
 	}
 	// Drop zero lines (a 0% fee merchant, or a payment so small the fee rounds to 0).
 	kept := postings[:0]
