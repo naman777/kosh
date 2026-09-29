@@ -21,6 +21,7 @@ type Receiver struct {
 	seen     map[string]int
 	accepted []string // event ids in first-seen order
 	rejected int
+	sunk     int // deliveries to /sink
 }
 
 // Receiver modes.
@@ -47,6 +48,7 @@ type Stats struct {
 	Unique     int            `json:"unique"`
 	Duplicates int            `json:"duplicates"`
 	Rejected   int            `json:"rejected"`
+	Sunk       int            `json:"sunk"`
 	Mode       string         `json:"mode"`
 	PerEvent   map[string]int `json:"-"`
 }
@@ -55,7 +57,7 @@ type Stats struct {
 func (r *Receiver) Stats() Stats {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	s := Stats{Unique: len(r.seen), Rejected: r.rejected, Mode: r.mode, PerEvent: map[string]int{}}
+	s := Stats{Unique: len(r.seen), Rejected: r.rejected, Sunk: r.sunk, Mode: r.mode, PerEvent: map[string]int{}}
 	for id, n := range r.seen {
 		s.PerEvent[id] = n
 		s.Duplicates += n - 1
@@ -127,5 +129,14 @@ func (r *Receiver) Admin() http.Handler {
 		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.Handle("POST /webhooks", r)
+	// /sink/... accepts any delivery without checking signatures: a target
+	// for load tests where many merchants (with different secrets) post here.
+	mux.HandleFunc("POST /sink/{rest...}", func(w http.ResponseWriter, req *http.Request) {
+		io.Copy(io.Discard, req.Body)
+		r.mu.Lock()
+		r.sunk++
+		r.mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	})
 	return mux
 }
