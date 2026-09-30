@@ -9,7 +9,7 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/ \
       ./cmd/api ./cmd/worker ./cmd/relay ./cmd/dispatcher ./cmd/banksim ./cmd/samplemerchant ./cmd/lab ./cmd/sim
 
 FROM alpine:3.20
-RUN apk add --no-cache ca-certificates tzdata && adduser -D -u 10001 kosh
+RUN apk add --no-cache ca-certificates tzdata && adduser -D -u 10001 kosh && mkdir /data && chown kosh /data
 COPY --from=build /out/ /usr/local/bin/
 USER kosh
 ENTRYPOINT ["/bin/sh", "-c", "exec \"$0\" \"$@\""]

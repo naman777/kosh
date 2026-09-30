@@ -69,5 +69,33 @@ services:
     ports:
       - "127.0.0.1:3002:3000"
 
+  # The whole system in containers: docker compose --profile stack up -d --build
+  # The lab runs every Kosh process inside one container so it can kill them.
+  lab:
+    build: .
+    image: kosh:latest
+    profiles: ["stack"]
+    command: ["lab"]
+    environment:
+      KOSH_DATABASE_URL: postgres://kosh:kosh@postgres:5432/kosh_lab?sslmode=disable
+      KOSH_KAFKA_BROKERS: redpanda:9092
+      LAB_DATA: /data
+      LAB_TRAFFIC: "5"
+    volumes:
+      - labdata:/data
+    depends_on:
+      postgres: { condition: service_healthy }
+      redpanda: { condition: service_healthy }
+    ports:
+      - "127.0.0.1:8095:8095"
+
+  dashboard:
+    build: ./dashboard
+    profiles: ["stack"]
+    depends_on: [lab]
+    ports:
+      - "127.0.0.1:3005:3005"
+
 volumes:
   pgdata:
+  labdata:
