@@ -1,0 +1,43 @@
+# Production overrides for the VM. Use with the base file:
+#   docker compose -f docker-compose.yml -f deploy/compose.prod.yml --profile stack up -d --build
+# Caddy is the only thing listening publicly: the dashboard at /, Grafana at /grafana.
+services:
+  caddy:
+    image: caddy:2.8.4
+    profiles: ["stack"]
+    restart: unless-stopped
+    environment:
+      DOMAIN: ${DOMAIN:-:80}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddydata:/data
+    depends_on: [dashboard, grafana]
+
+  lab:
+    restart: unless-stopped
+    environment:
+      LAB_TRAFFIC: "2"
+
+  dashboard:
+    restart: unless-stopped
+
+  grafana:
+    restart: unless-stopped
+    environment:
+      GF_SERVER_ROOT_URL: "%(protocol)s://%(domain)s/grafana/"
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+
+  prometheus:
+    restart: unless-stopped
+
+  postgres:
+    restart: unless-stopped
+
+  redpanda:
+    restart: unless-stopped
+
+volumes:
+  caddydata:

@@ -1,0 +1,11 @@
+# DOMAIN is a hostname (Caddy gets a Let's Encrypt certificate for it) or
+# ":80" to serve plain HTTP on the VM's IP.
+{$DOMAIN} {
+	encode gzip
+	handle /grafana* {
+		reverse_proxy grafana:3000
+	}
+	handle {
+		reverse_proxy dashboard:3005
+	}
+}
