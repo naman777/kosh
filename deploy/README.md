@@ -47,3 +47,31 @@ The script ships the committed code (`git archive HEAD`), builds the images on t
 - Visitors can kill processes. Nothing restarts them automatically except the Start button, by design. If the VM itself restarts, `restart: unless-stopped` brings every container back and the lab restarts all processes.
 - Grafana's anonymous access is read-only. Its admin password defaults to `kosh`; set `GRAFANA_ADMIN_PASSWORD` in the environment before deploying to change it.
 - Cost: an `e2-standard-2` runs roughly US$50 a month; stop the VM when you're not demoing.
+
+## On a VM that already runs other apps (operator-prod)
+
+`kosh.namankundra.com` runs on `operator-prod` (34.180.44.15) beside Foreman, Nightshift and Fathom, behind Foreman's Caddy. That host uses `deploy/compose.shared.yml` instead of the files above:
+
+- No host ports. Only `kosh-dashboard` and `kosh-grafana` join `foreman-production_default`, and every service name starts with `kosh-`, so nothing shadows Foreman's own `dashboard`.
+- CPU and memory caps on every container (about 20% CPU and 630 MB in use at 1 sale/s).
+- Images are built on a workstation and loaded over SSH, never built on the shared host.
+
+Deploy or update:
+
+```bash
+git archive --format=tar HEAD deploy | ssh operator-prod 'mkdir -p ~/kosh && tar x -C ~/kosh'
+```
+
+```bash
+docker save kosh:latest kosh-dashboard:latest | gzip -1 | ssh operator-prod 'gunzip | sudo docker load'
+```
+
+```bash
+ssh operator-prod 'cd ~/kosh/deploy && sudo docker compose -p kosh -f compose.shared.yml up -d'
+```
+
+Routing lives in Foreman's Caddyfile (`~/Foreman/deploy/Caddyfile`, the `kosh.namankundra.com` block). Caddy's container holds a stale copy of that bind-mounted file, so a config change is applied with a hot reload from stdin, never a restart:
+
+```bash
+ssh operator-prod 'sudo docker exec -i foreman-production-caddy-1 caddy reload --adapter caddyfile --config /dev/stdin < ~/Foreman/deploy/Caddyfile'
+```
