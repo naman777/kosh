@@ -8,24 +8,72 @@ Kosh (कोष) means treasury.
 >
 > **Status: phase 6 of 6 built and deployed; final load numbers still to measure.** The [build plan](IMPLEMENTATION_PLAN.md)'s ledger, payments with idempotency, events with webhooks, bank chaos with T+1 settlement, reconciliation, the simulation harness, metrics, the failure lab and the deploy are built. Progress is in [progress.md](progress.md) and the queue in [NEXT.md](NEXT.md).
 
+## What's built
+
+| Area | What it does | Where |
+| --- | --- | --- |
+| Ledger | Double-entry bookkeeping in integer paise; append-only, enforced by triggers; accounts locked in id order; holds that post or void exactly once; balance limits; hot system accounts split into 16 shards | `internal/ledger`, `internal/money` |
+| Payments API | Merchants, API keys, orders, payments, capture, partial and full refunds; a guarded state machine; every POST idempotent (atomic phases, fenced leases, byte-identical replays) | `cmd/api`, `internal/payments`, `internal/idempotency` |
+| Bank and UPI simulator | Declines, timeouts, answers decided later, outages, signed late and duplicate callbacks, payouts, daily settlement files with injected bad rows | `cmd/banksim`, `internal/banksim` |
+| Recovery worker | Polls the bank for every answer still owed, refunds late successes automatically, expires holds only after asking the bank, pays merchants on T+1, reconciles yesterday's bank file | `cmd/worker`, `internal/worker` |
+| Events and webhooks | Transactional outbox, relay to Redpanda (Kafka API), dispatcher with HMAC-signed deliveries, backoff, 24-hour pause, replay API | `cmd/relay`, `cmd/dispatcher`, `internal/outbox`, `internal/webhooks` |
+| Reconciliation | Matches every bank line to the ledger in six statuses, posts one cash entry per file, sends differences to a suspense account, and keeps an exception queue resolved by adjusting entries | `internal/recon` |
+| Correctness | 11 invariants as SQL; property, race, crash and chaos tests; a test that kills real processes; a deterministic simulation harness with seed replay (200 seeds in CI) | `invariants/`, `sim/`, `e2e/`, `cmd/sim` |
+| Observability | Prometheus metrics in every process and a provisioned Grafana dashboard | `internal/metrics`, `deploy/` |
+| Failure lab | A supervisor that runs every process, plus a dashboard to kill processes, break the bank or the merchant, and drive traffic while the ledger is watched live | `cmd/lab`, `dashboard/` |
+| Load and benchmarks | k6 scenarios (steady, one hot merchant, webhook fan-out) and a ledger benchmark | `loadtest/`, `cmd/ledgerbench` |
+| Deploy | One Docker image for all binaries, compose profiles, Caddy with HTTPS, a VM deploy kit; live on a shared GCP VM | `Dockerfile`, `docker-compose.yml`, `deploy/` |
+
 ## Architecture
 
 ```mermaid
-flowchart LR
-    M[Merchant] -- "REST + Idempotency-Key" --> API[api]
-    API -- "authorize / refund" --> BANK[banksim<br/>bank + UPI simulator]
+flowchart TB
+    M["Merchant"] -- "REST + Idempotency-Key" --> API["api"]
+    API -- "authorize / refund" --> BANK["banksim<br/>bank + UPI simulator"]
     BANK -- "signed callbacks<br/>late, duplicated" --> API
-    API -- "one transaction:<br/>state + ledger + outbox" --> PG[(Postgres 16<br/>source of truth)]
-    WORKER[worker] -- "status polls, payouts" --> BANK
-    WORKER -- "pollers, hold expiry,<br/>T+1 settlement" --> PG
-    PG -- "unpublished rows<br/>FOR UPDATE SKIP LOCKED" --> RELAY[relay]
-    RELAY -- kosh.events --> RP[[Redpanda<br/>Kafka API]]
-    RP --> DISP[dispatcher]
-    DISP -- "deliveries, retries,<br/>disable after 24 h" --> PG
-    DISP -- "HMAC-signed POST" --> HOOK[Merchant webhook]
+    API -- "one transaction:<br/>state + ledger + outbox" --> PG[("Postgres 16<br/>source of truth")]
+
+    WORKER["worker"] -- "status polls, payouts" --> BANK
+    BANK -- "daily settlement file<br/>(with bad rows)" --> WORKER
+    WORKER -- "pollers, late-success refunds,<br/>hold expiry, T+1 payouts,<br/>reconciliation" --> PG
+
+    PG -- "unpublished rows<br/>FOR UPDATE SKIP LOCKED" --> RELAY["relay"]
+    RELAY -- "kosh.events" --> RP[["Redpanda<br/>Kafka API"]]
+    RP --> DISP["dispatcher"]
+    DISP -- "deliveries, retries,<br/>pause after 24 h" --> PG
+    DISP -- "HMAC-signed POST" --> HOOK["Merchant webhook"]
 ```
 
-Postgres is the only source of truth. A state change, its ledger entry and the outbox event announcing it commit in one transaction, before anything leaves the system. The relay copies outbox rows to Kafka. The dispatcher turns each event into a delivery row and retries it until the merchant answers 2xx. The worker chases every answer the bank still owes and pays merchants on T+1. Each binary runs on its own, so each can be killed on its own.
+Postgres is the only source of truth. A state change, its ledger entry and the outbox event announcing it commit in one transaction, before anything leaves the system. The relay copies outbox rows to Kafka. The dispatcher turns each event into a delivery row and retries it until the merchant answers 2xx. The worker chases every answer the bank still owes, pays merchants on T+1, and reconciles the bank's settlement file every day. Each binary runs on its own, so each can be killed on its own.
+
+### How a payment's money moves
+
+```mermaid
+flowchart LR
+    AUTH["Authorization<br/>Dr bank_receivable<br/>Cr unallocated_receipts"] --> CAP["Capture<br/>Dr unallocated_receipts<br/>Cr merchant, fee, GST"]
+    CAP --> REF["Refund (hold, then post)<br/>Dr merchant_payable<br/>Cr bank_receivable"]
+    CAP --> PAY["T+1 payout (hold, then post)<br/>Dr merchant_payable<br/>Cr bank_settlement"]
+    AUTH --> REC["Reconciliation<br/>Dr bank_settlement, bank_charges<br/>Cr bank_receivable"]
+    REC --> SUS["Differences<br/>recon_suspense → exception queue"]
+```
+
+### How it runs live
+
+```mermaid
+flowchart LR
+    V["Visitor"] -- "HTTPS" --> CADDY["Caddy<br/>(shared with other apps)"]
+    CADDY -- "/" --> DASH["dashboard<br/>Next.js"]
+    CADDY -- "/grafana" --> GRAF["Grafana"]
+    DASH -- "/lab/*" --> LAB["lab supervisor"]
+    LAB -- "starts, SIGKILLs" --> PROCS["api · worker · relay ·<br/>dispatcher · banksim ·<br/>samplemerchant"]
+    LAB -- "customer traffic" --> PROCS
+    PROCS --> PGL[("Postgres")]
+    PROCS --> RPL[["Redpanda"]]
+    PROM["Prometheus"] -- "scrapes /metrics" --> PROCS
+    GRAF --> PROM
+```
+
+The lab runs every Kosh process as a child, so the dashboard can kill any of them, switch the bank or the merchant's endpoint into a failure mode, and drive traffic, while it re-checks the invariants every five seconds. On the shared VM every container has CPU and memory caps, and only the dashboard and Grafana are reachable through Caddy.
 
 ## Numbers
 
@@ -39,7 +87,7 @@ These are measured, not targets. Hardware: Intel Core i5-13450HX (10 cores / 16 
 | Every transfer credits one merchant (hot account) | 16 | 318 /s | 11.8 ms | 693 ms |
 | Capture-shaped entries (receivable, merchant, fee, GST) | 16 | 278 /s | 12.5 ms | 576 ms |
 
-The last row is the interesting one. Every capture debits `bank_receivable` and credits `fee_revenue` and `gst_payable`. Those three rows are shared by every payment in the system, so captures serialize on their row locks. Throughput drops 7× and p99 goes from 22 ms to over half a second. That is the hot-account problem, measured. [ADR 0003](docs/adr/0003-pessimistic-locking.md) explains why the locking is built this way and the planned fix (sharded system accounts).
+The last row is the interesting one. Every capture debits `bank_receivable` and credits `fee_revenue` and `gst_payable`. Those three rows are shared by every payment in the system, so captures serialize on their row locks. Throughput drops 7× and p99 goes from 22 ms to over half a second. That is the hot-account problem, measured. [ADR 0003](docs/adr/0003-pessimistic-locking.md) explains why the locking is built this way. The fix, sharding those accounts by payment id, is now built; its before/after measurement is next in [NEXT.md](NEXT.md).
 
 **Simulation: 5,200 of 10,000 seeds done with 0 failures so far (the full run is still going; 200 seeds also pass on every CI run).** Each seed is a fresh database and a seeded world (workload, ids, clock, retry jitter, and an in-process bank that declines, times out, answers late, goes down and sends duplicate callbacks). It runs 60 random steps, including crashes at named crashpoints, with every invariant checked after every step, then drains and checks all 11. Seeds replay exactly: `go run ./cmd/sim -seed 42 -v`. Planting any of four bugs by hand made between 9 and 39 of 40 seeds fail, so the harness does catch bugs.
 
@@ -234,7 +282,7 @@ go run ./cmd/sim -seed 42 -v
 
 These are known limits, not bugs. Most are scheduled.
 
-- **Hot system accounts.** Every capture locks the same three rows (see Numbers). Sharding `bank_receivable`, `fee_revenue` and `gst_payable` into N sub-accounts is planned for phase 6.
+- **One hot merchant.** System accounts are now sharded, but a single merchant's own payable can't be split without breaking "never negative", so one very busy merchant still serializes on its row. Batched postings are the planned option (NEXT.md).
 - **Exceptions wait for a human.** Recon surfaces every disagreement (a refund the bank completed after Kosh gave up on it shows up as `missing_in_ledger`), but nothing alerts anyone or enforces an SLA on the queue. An auto refund the bank declines is not retried; its amount stays visible in `customer_refund_payable`.
 - **Uncaptured authorizations are never released.** Gateways auto-refund an authorization that isn't captured within a few days; in Kosh the money stays in `unallocated_receipts`.
 - **The simulation is single-goroutine.** That is what makes it replayable. Concurrency bugs are covered by the race-detector tests and `TestBankChaos` instead, and those are not replayable step by step.
