@@ -4,7 +4,9 @@ Kosh is a payments core in Go and Postgres. It takes merchant orders, collects p
 
 Kosh (कोष) means treasury.
 
-> **Status: past Gate 1, phase 4 of 6 done.** The [build plan](IMPLEMENTATION_PLAN.md)'s ledger, payments with idempotency, events with webhooks, and bank chaos with T+1 settlement are built. Reconciliation, the simulation harness, load tests and the dashboard come next. Progress is tracked in [progress.md](progress.md).
+> **Live failure lab: https://kosh.namankundra.com**: kill processes, break the bank, take the merchant down, and watch the ledger stay balanced. Metrics are at [/grafana](https://kosh.namankundra.com/grafana/).
+>
+> **Status: phase 6 of 6 built and deployed; final load numbers still to measure.** The [build plan](IMPLEMENTATION_PLAN.md)'s ledger, payments with idempotency, events with webhooks, bank chaos with T+1 settlement, reconciliation, the simulation harness, metrics, the failure lab and the deploy are built. Progress is in [progress.md](progress.md) and the queue in [NEXT.md](NEXT.md).
 
 ## Architecture
 
@@ -39,21 +41,34 @@ These are measured, not targets. Hardware: Intel Core i5-13450HX (10 cores / 16 
 
 The last row is the interesting one. Every capture debits `bank_receivable` and credits `fee_revenue` and `gst_payable`. Those three rows are shared by every payment in the system, so captures serialize on their row locks. Throughput drops 7× and p99 goes from 22 ms to over half a second. That is the hot-account problem, measured. [ADR 0003](docs/adr/0003-pessimistic-locking.md) explains why the locking is built this way and the planned fix (sharded system accounts).
 
-Correctness so far: the SQL invariants hold at the end of every database test. Those tests include 50 goroutines making crossing transfers, 10 concurrent refunds on one payment, crashes at every named crashpoint, and a test that kills the real `relay` and `dispatcher` processes (60 events delivered, 30 duplicates, 0 lost). A separate in-memory property test checks the balance and limit rules after each of 1,000,000 random steps.
+**Simulation: 5,200 of 10,000 seeds done with 0 failures so far (the full run is still going; 200 seeds also pass on every CI run).** Each seed is a fresh database and a seeded world (workload, ids, clock, retry jitter, and an in-process bank that declines, times out, answers late, goes down and sends duplicate callbacks). It runs 60 random steps, including crashes at named crashpoints, with every invariant checked after every step, then drains and checks all 11. Seeds replay exactly: `go run ./cmd/sim -seed 42 -v`. Planting any of four bugs by hand made between 9 and 39 of 40 seeds fail, so the harness does catch bugs.
+
+**Reconciliation:** on a day of 300 payments and 20 refunds, with a bank file salted with fee-variance, missing, duplicate and amount-mismatch rows, recon classified 320 of 320 lines and injected faults correctly (`TestReconAccuracy`).
+
+The SQL invariants also hold at the end of every database test. Those tests include 50 goroutines making crossing transfers, 10 concurrent refunds on one payment, crashes at every named crashpoint, and a test that kills the real `relay` and `dispatcher` processes (60 events delivered, 30 duplicates, 0 lost). A separate in-memory property test checks the balance and limit rules after each of 1,000,000 random steps.
 
 The bank chaos test (`TestBankChaos`) runs about 100 payments, refunds and a day's settlement over HTTP against a bank that declines 10%, times out 10%, answers "pending" 25%, goes down every 600 ms, and sends each callback up to 4 times. A typical run has around 15 late successes auto-refunded and 250 callbacks applied, and every invariant holds afterwards. It found two real bugs on its first runs (see [progress.md](progress.md#bugs-caught-by-tests)).
 
 ## The ledger in one example
 
-A ₹1,000 UPI payment from a merchant on a 2% fee, with 18% GST charged on the fee:
+A ₹1,000 UPI payment from a merchant on a 2% fee, with 18% GST charged on the fee. When the bank authorizes it, the customer's money is held, belonging to nobody yet:
 
 | Account | Debit (paise) | Credit (paise) |
 | --- | ---: | ---: |
 | bank_receivable | 1,00,000 | |
+| unallocated_receipts | | 1,00,000 |
+
+Capture allocates it:
+
+| Account | Debit (paise) | Credit (paise) |
+| --- | ---: | ---: |
+| unallocated_receipts | 1,00,000 | |
 | merchant_payable (Chai Point) | | 97,640 |
 | fee_revenue | | 2,000 |
 | gst_payable | | 360 |
 | **Total** | **1,00,000** | **1,00,000** |
+
+When the bank's settlement file arrives, reconciliation clears `bank_receivable` into `bank_settlement` (cash), less the bank's own charges ([ADR 0006](docs/adr/0006-receivable-at-authorization.md) explains the split).
 
 Amounts are `BIGINT` paise everywhere; there are no floats anywhere near money. Fee and GST are rounded half-up to the paisa, and the merchant's line absorbs the rounding, so an entry always balances exactly ([rules](internal/money/money.go)). Ledger rows are append-only, and Postgres triggers reject any `UPDATE` or `DELETE` on them. A correction is always a new entry.
 
@@ -61,7 +76,7 @@ A refund is a two-phase hold. Kosh reserves the amount on the merchant's balance
 
 ## Invariants
 
-These are the spec. Each is a SQL query in [`invariants/`](invariants) that returns violating rows. Tests run all of them, and later the simulation harness will run them after every step.
+These are the spec. Each is a SQL query in [`invariants/`](invariants) that returns violating rows. Tests run all of them, and the simulation harness runs them after every step.
 
 | # | Rule | Status |
 | --- | --- | --- |
@@ -74,7 +89,7 @@ These are the spec. Each is a SQL query in [`invariants/`](invariants) that retu
 | 7 | Every state change writes exactly one outbox event, in the same transaction | checked |
 | 8 | Every event reaches each enabled merchant at least once | checked at quiescence |
 | 9 | A hold resolves at most once and expires by its deadline | checked |
-| 10 | Every captured payment matches a bank settlement line or is in the exception queue by T+2 | phase 5 |
+| 10 | Every captured payment matches a bank settlement line or is in the exception queue by T+2 | checked |
 | 11 | Posted entries are never updated or deleted | enforced by triggers, checked |
 
 ## How the hard parts work
@@ -83,6 +98,10 @@ These are the spec. Each is a SQL query in [`invariants/`](invariants) that retu
 - **Concurrency.** Every payment state change is one guarded `UPDATE … WHERE state = $expected`. Ledger accounts are locked in ascending id order, so two entries can never deadlock. Concurrent refunds are serialized on the payment row and bounded by `refunded + x ≤ amount`.
 - **Bank answers** arrive three ways: the API's own call, a signed callback (late and possibly repeated), and the worker's status poll. All three go through one resolver that locks the payment and decides from its current state. A timeout means "unknown", never "failed". A payment the bank never received is failed. One still pending after 30 minutes is failed too, and if the bank says success after that, the **late success** is recorded and an **auto refund** sends the money back to the customer.
 - **Hold deadlines are not commit deadlines.** If the bank confirms a refund or payout after its hold's deadline, the money still moved, so the hold is committed anyway. Expiry asks the bank before it voids anything ([ADR 0005](docs/adr/0005-hold-deadlines.md)).
+- **Reconciliation** reads the bank's daily file and matches each line to a bank-confirmed payment or refund, by bank reference and then by Kosh's id. It classifies each one as `matched`, `fee_variance`, `amount_mismatch`, `duplicate`, `missing_in_ledger`, or (for an item that never showed up by T+2) `missing_in_bank`. One entry per file moves cash into `bank_settlement`. Every difference goes to `recon_suspense`, and resolving an exception posts an adjusting entry; nothing is edited. A missing item that turns up later closes its own exception.
+- **The simulation harness** (`sim/`) runs one goroutine against a fake clock and a seeded bank, so a seed fixes the whole run, and a trace hash proves a replay matched. Postgres is real and is not replayed; with one goroutine, nothing in it races.
+- **Hot accounts are sharded.** The four system accounts every payment touches have 16 shards each, picked from the payment id, so payments stop queueing on one row lock (ADR 0003). The before/after numbers are next in [NEXT.md](NEXT.md).
+- **The failure lab** (`cmd/lab` plus `dashboard/`) runs every process as a child, so the dashboard can SIGKILL any of them, switch the bank into flaky, late or outage mode, break the merchant's endpoint, and drive traffic, while it re-checks the invariants every 5 s.
 - **T+1 settlement.** Each merchant is paid its available balance minus the credits it earned today, so refunds and open holds are netted out and today's sales wait for tomorrow. A payout is a two-phase hold: it posts on bank success and voids on failure, and a failed payout is picked up by the next day's batch. Payouts never time out: failing one the bank later completes would pay twice.
 - **Events** use a transactional outbox, not dual writes. The relay publishes rows and marks them published only after Kafka acknowledges them. A crash in between republishes the batch, so delivery is at-least-once. The dispatcher dedupes with `ON CONFLICT`, and merchants dedupe by event id.
 - **Webhooks** are signed with `Kosh-Signature: t=<unix>,v1=<HMAC-SHA256(secret, t.body)>`. Retries use exponential backoff from 10 s to 1 h with jitter. A merchant failing for 24 hours is paused until it calls `POST /v1/webhooks/replay`.
@@ -167,14 +186,58 @@ Add `"outage": true` to take the bank down. The worker pays merchants for yester
 curl -s -X POST localhost:8090/admin/settlements/run -H "Authorization: Bearer dev-admin" -d '{"date":"2026-10-17"}'
 ```
 
-The bank's settlement file for a day, with its injected bad rows, is at `localhost:8091/v1/settlements/<date>`, and the list of what was injected is at `/admin/settlements/<date>/faults`.
+The bank's settlement file for a day, with its injected bad rows, is at `localhost:8091/v1/settlements/<date>`, and the list of what was injected is at `/admin/settlements/<date>/faults`. The worker reconciles yesterday's file automatically. To do it by hand and work the exception queue:
+
+```bash
+curl -s -X POST localhost:8090/admin/recon/run -H "Authorization: Bearer dev-admin" -d '{"date":"2026-10-17"}'
+```
+
+```bash
+curl -s localhost:8090/admin/recon/exceptions -H "Authorization: Bearer dev-admin"
+```
+
+```bash
+curl -s -X POST localhost:8090/admin/recon/exceptions/1/resolve -H "Authorization: Bearer dev-admin" -d '{"action":"write_off"}'
+```
+
+Run the failure lab locally (build the binaries into `bin/` first), with the dashboard at localhost:3005:
+
+```bash
+go build -o bin/ ./cmd/...
+```
+
+```bash
+./bin/lab
+```
+
+```bash
+npm --prefix dashboard install && npm --prefix dashboard run dev
+```
+
+Or run everything in containers, with Prometheus at localhost:9090 and Grafana at localhost:3002:
+
+```bash
+docker compose --profile stack up -d --build
+```
+
+Run the simulation (each seed takes a fresh database from the compose Postgres):
+
+```bash
+go run ./cmd/sim -seeds 200 -parallel 8
+```
+
+```bash
+go run ./cmd/sim -seed 42 -v
+```
 
 ## Where it breaks
 
 These are known limits, not bugs. Most are scheduled.
 
 - **Hot system accounts.** Every capture locks the same three rows (see Numbers). Sharding `bank_receivable`, `fee_revenue` and `gst_payable` into N sub-accounts is planned for phase 6.
-- **Some bank surprises wait for reconciliation (phase 5).** A refund the bank completes *after* Kosh gave up on it (24 h pending), or an auto refund the bank declines, leaves the ledger and the bank disagreeing. Nothing goes negative, but only the phase 5 recon engine will surface it as an exception. Until then `bank_settlement` only records cash going out (payouts), never cash coming in.
+- **Exceptions wait for a human.** Recon surfaces every disagreement (a refund the bank completed after Kosh gave up on it shows up as `missing_in_ledger`), but nothing alerts anyone or enforces an SLA on the queue. An auto refund the bank declines is not retried; its amount stays visible in `customer_refund_payable`.
+- **Uncaptured authorizations are never released.** Gateways auto-refund an authorization that isn't captured within a few days; in Kosh the money stays in `unallocated_receipts`.
+- **The simulation is single-goroutine.** That is what makes it replayable. Concurrency bugs are covered by the race-detector tests and `TestBankChaos` instead, and those are not replayable step by step.
 - **A bank answer Kosh can't apply** (for example a reference that already belongs to another payment) leaves that one item pending and retrying with backoff. The rest of the batch carries on, but nobody is alerted yet.
 - **Event order across relays.** With one relay, each payment's events reach Kafka in order. With several relays, batches can interleave. Every envelope carries the aggregate's `version`, so receivers can drop stale updates.
 - **At-least-once means duplicates.** The kill test delivered 30 duplicates for 60 events. Merchants must dedupe by `Kosh-Event-Id`.
@@ -188,11 +251,13 @@ There is no real bank, UPI or card network, and no real money. There is no card 
 ## Repository
 
 ```text
-cmd/            api, worker, banksim, relay, dispatcher, samplemerchant, ledgerbench
+cmd/            api, worker, banksim, relay, dispatcher, samplemerchant, lab, ledgerbench, sim
 internal/
   money/        paise type, fee and GST rounding
   ledger/       accounts, entries, holds, ordered locking
   payments/     state machine, payments, refunds, bank-answer resolver, pollers, settlement, payouts
+  recon/        settlement-file ingestion, matching, exception queue
+  metrics/      Prometheus metrics
   worker/       background loop: pollers, hold expiry, daily settlement
   idempotency/  atomic phases, leases, stored responses
   outbox/       transactional outbox and relay
@@ -204,6 +269,10 @@ internal/
   clock/ ids/ rng/  injectable time, ids and randomness
 invariants/     one SQL file per invariant + checker
 migrations/     embedded SQL migrations
+sim/            deterministic simulation harness and its in-process bank
 e2e/            kills real processes
+dashboard/      the failure lab UI (Next.js)
+loadtest/       k6 scenarios
+deploy/         Prometheus, Grafana, Caddy, compose files and the VM deploy
 docs/           DESIGN.md, adr/
 ```

@@ -2,8 +2,8 @@
 
 Plan: [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) · Spec: [Payments Core — Build Plan.md](Payments%20Core%20—%20Build%20Plan.md)
 
-**Current phase:** Phase 4 done. Next: Phase 5 · Reconciliation and simulation
-**Last updated:** 2026-10-17
+**Current phase:** Phase 6 built and deployed (https://kosh.namankundra.com). Next: measured numbers, then launch. The queue is in [NEXT.md](NEXT.md).
+**Last updated:** 2026-10-18
 
 ## Status
 
@@ -14,8 +14,8 @@ Plan: [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) · Spec: [Payments Core �
 | 2 · Payments and idempotency | done (2026-10-17) |
 | 3 · Events and webhooks → Gate 1 | done (2026-10-17) |
 | 4 · Bank chaos and settlement | done (2026-10-17) |
-| 5 · Reconciliation and simulation | not started |
-| 6 · Load, observability, launch | not started |
+| 5 · Reconciliation and simulation | done (2026-10-18) |
+| 6 · Load, observability, launch | built and deployed; numbers pending |
 
 ## Phase 0 · Scaffold
 
@@ -98,6 +98,45 @@ Notes:
 - Payouts never fail just for staying pending; only their 7-day hold expiry ends them, after asking the bank. Failing a payout the bank later completes would pay twice.
 - Auto refunds the bank declines stay as a balance in `customer_refund_payable`. Phase 5's exception queue will surface them.
 
+## Phase 5 · Reconciliation and simulation
+
+Detailed plan: [IMPLEMENTATION_PLAN.md § Phase 5](IMPLEMENTATION_PLAN.md#phase-5--reconciliation-and-simulation-build-plan-week-5).
+
+- [x] Recon schema (`migrations/0005_recon.sql`): settlement files and lines, `recon_results` (the exception queue), `bank_confirmed_at`, accounts `bank_charges`, `recon_suspense`, `recon_writeoff`
+- [x] Invariant 10 as SQL: T+2 coverage, one result per line, suspense equals open exceptions
+- [x] Shared settlement file builder and CSV parser (`banksim.BuildSettlement`, `WriteCSV`, `ParseCSV`) and `bank.SettlementSource`
+- [x] Recon engine (`internal/recon`): ingest (checksummed, idempotent), six-status matching, one settlement entry per file, missing items flagged at T+2 and auto-closed if they turn up, `Resolve` with write_off or bank_corrected adjusting entries
+- [x] Receivable recognized at authorization (`unallocated_receipts`), so every collected payment can be reconciled (ADR 0006)
+- [x] Worker reconciles yesterday's file; admin endpoints `POST /admin/recon/run`, `GET /admin/recon/exceptions`, `POST /admin/recon/exceptions/{id}/resolve`
+- [x] Simulation harness (`sim/`): seeded workload, ids, clock and in-process bank; 13 step kinds including crashes at all 11 crashpoints; invariants after every step; a drain; all 11 at the end; a trace hash for replay
+- [x] `cmd/sim` (`-seed N -v` to replay, `-seeds 10000 -parallel 8` to soak), `make sim SEED=…`, 200 seeds in CI
+- [x] Harness validated by planting four bugs (each caught by 9–39 of 40 seeds)
+- [ ] 10,000 seeds locally: 5,200 of 10,000 seeds done with 0 failures so far (the full run is still going; 200 seeds also pass on every CI run)
+
+**Done-when check:** recon classified 320/320 injected faults and clean lines correctly (`TestReconAccuracy`). The 10,000-seed soak is past the halfway mark with no failures; the final count goes here when it ends.
+
+Coverage of a 100-seed run (how many seeds reached each path): late successes in 24, auto refunds in 24, payouts in 92, every recon status in about 30, missing_in_ledger in 8, retried webhooks in 55, crashes at 10 of 11 points (payouts.after_bank needs a settlement run in the same step).
+
+## Phase 6 · Load, observability, launch → Gate 2
+
+Detailed plan: [IMPLEMENTATION_PLAN.md § Phase 6](IMPLEMENTATION_PLAN.md#phase-6--load-observability-launch-build-plan-week-6--gate-2).
+
+- [x] Prometheus metrics in every binary (request latency per route, bank calls, ledger post time and lock waits, outbox lag, webhook backlog and delivery latency, payments by state, open recon exceptions); Prometheus and a provisioned Grafana dashboard
+- [x] One Docker image for every binary, a dashboard image, and `docker compose --profile stack`
+- [x] k6 scenarios: steady, one hot merchant, webhook fan-out (`loadtest/`)
+- [x] Hot system accounts sharded by payment id (16 shards; `KOSH_SYSTEM_SHARDS`, `ledgerbench -shards`); all tests and the simulation pass with it on
+- [x] Failure lab: `cmd/lab` supervises every process (SIGKILL and start), with bank presets, merchant endpoint modes, traffic and live state; the Next.js dashboard drives it
+- [x] Deploy kit for a fresh VM (`deploy/compose.prod.yml`, Caddy, `deploy.sh`) and a shared-host compose file
+- [x] **Deployed** to `operator-prod` beside Foreman, Nightshift and Fathom: https://kosh.namankundra.com (Let's Encrypt), Grafana at /grafana; about 20% CPU and 630 MB; the neighbours were untouched (Caddy hot-reloaded, not restarted)
+- [x] Demo shot list (`docs/DEMO.md`)
+- [ ] Load numbers and the sharding before/after (after the soak, so nothing competes for the database)
+- [ ] Resume line with measured numbers, demo video, repo public
+
+Notes:
+
+- The failure lab survived a flaky bank, a failing merchant endpoint and SIGKILLs of the API, relay and dispatcher: 444 sales with 203 client retries, 1,346 webhooks delivered, debits equal to credits, 10/10 invariants holding.
+- In the first lab run invariant 3 failed on the dev database. Two payments from early smoke tests predate authorization entries, so they lack one. That's old data, not a bug, and it's why the lab uses its own `kosh_lab` database.
+
 ## Decisions
 
 Changes to, or details missing from, the build plan.
@@ -122,6 +161,15 @@ Changes to, or details missing from, the build plan.
 - 2026-10-17 · The payout entry credits `bank_settlement` (cash out). It runs negative until phase 5 posts the bank's incoming settlements.
 - 2026-10-17 · The bank charges Kosh 0% on UPI and 1% + 18% GST on cards (`bank.Fee`). Settlement files deduct it; recon will check it.
 - 2026-10-17 · `api.New` takes a `Config` (admin token, bank callback secret).
+- 2026-10-18 · Authorization posts Dr `bank_receivable` / Cr `unallocated_receipts`, and capture moves it to the merchant (ADR 0006). Found while designing recon: the bank settles authorizations, captured or not.
+- 2026-10-18 · Recon puts every difference in `recon_suspense` and clears the receivable at what Kosh expected, so the settlement entry always balances and the suspense balance is the size of the problem.
+- 2026-10-18 · Settlement fees: `bank_charges` is posted at the bank's published schedule, and any variance waits in suspense.
+- 2026-10-18 · The simulation runs one goroutine on real Postgres. Replays are exact (proven by trace hash); concurrency stays covered by `-race` tests and `TestBankChaos`.
+- 2026-10-18 · Crashpoints are armed per context (`crash.WithArms` / `crash.At`), so parallel seeds in one process can't trigger each other's crashes.
+- 2026-10-18 · The shard count is fixed when a database is first set up and read back afterwards; changing it would move existing payments to different shards.
+- 2026-10-18 · The repo is private on GitHub (naman777/kosh) until launch.
+- 2026-10-18 · On the shared host, Kosh's services are all named `kosh-*` and only two join Foreman's network. Compose registers service names as DNS there, and Foreman's Caddy proxies to a plain `dashboard`.
+- 2026-10-18 · Foreman's Caddy holds a stale bind-mounted copy of its Caddyfile, so routes are hot-loaded from stdin after proving the adapted config only adds Kosh's host. Recreating that container is left to Naman (NEXT.md).
 
 ## Bugs caught by tests
 
@@ -134,6 +182,9 @@ The interview story. Every bug a test, invariant or the harness caught, with the
 5. **2026-10-17 · Yesterday's payout included today's sales.** Caught by `TestBankChaos` (a payout for a day with no sales). Under READ COMMITTED, `SELECT … FOR UPDATE` waited for a concurrent capture's lock, then re-read the account's *new* balance, but its "credits since cutoff" subquery kept the statement's *old* snapshot, so the new credit was counted as yesterday's. Reproduced deterministically in `TestSettlementIgnoresConcurrentCapture` (₹1,476.40 paid instead of ₹976.40), then fixed by locking in one statement and computing in the next.
 6. **2026-10-17 · Settlement dates compared as UTC timestamps.** Found while chasing bug 5: passing an IST-midnight `time.Time` for a `DATE` made Postgres compare it as 18:30 UTC of the day before, so "already paid today" never matched. The unique constraint still blocked double payouts, but every run redid the hold work for every merchant. Fix: pass dates as `YYYY-MM-DD` text.
 7. **2026-10-17 · One bad bank answer stalled every poller round.** Caught by a live smoke run: a restarted simulator reissued a bank reference already in the database, that payment's update hit `UNIQUE (bank_ref)`, and the pollers returned on the first error, so the rest of the batch never ran. Fix: per-item errors are collected and the batch continues (`TestPollerSkipsPoisonItem`); the simulator's references now carry a per-run tag.
+
+8. **2026-10-18 · The harness itself wasn't deterministic.** Caught by `TestReplayIsDeterministic` on its first run: the drain polled the in-memory bus with a 5 ms wall-clock timeout, and the same short context reached the database insert, so whether a batch landed depended on timing. Fix: drain by the consumer's lag, with no timeouts.
+9. **2026-10-18 · An invariant gap: nothing checked that a late success got its auto refund.** Found by planting that bug while validating the harness. Fix: invariant 4 now requires an auto refund for every failed payment with a bank reference.
 
 ## Numbers
 
@@ -149,9 +200,13 @@ Measured results only, with the hardware. Hardware: i5-13450HX (10C/16T), 16 GB,
 
 Crash test: 60 events, 60 delivered, 30 duplicates, 0 lost (`e2e/kill_test.go`).
 
-Not measured yet: API latency under k6 (phase 6), webhook delivery p99, crash-recovery time from the harness (phase 5).
+Reconciliation accuracy: 320/320 (100%) on a seeded day with 35 injected faults (`TestReconAccuracy`).
+
+Simulation: 5,200 of 10,000 seeds done with 0 failures so far (the full run is still going; 200 seeds also pass on every CI run).
+
+Not measured yet: API latency under k6 (phase 6), webhook delivery p99, crash-recovery time.
 
 ## Open questions
 
-- Push to GitHub (`github.com/naman777/kosh`) so CI runs? Nothing has been pushed. CI now includes the ~6 s chaos test.
-- Phase 6 hot-account fix: shard system accounts (simplest) or batch postings (more interesting to talk about)? This can wait until phase 6.
+- When to make the repo public (NEXT.md P1).
+- The one-hot-merchant case: try batched postings (NEXT.md P2) or publish the baseline as the talking point?
