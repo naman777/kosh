@@ -47,6 +47,26 @@ func main() {
 	l := ledger.New(clock.Real{})
 	chart, err := l.EnsureChart(ctx, pool, *shards)
 	check(err)
+	if *mode == "capture" {
+		// Capture debits unallocated_receipts, which can't go negative. In
+		// Kosh an authorization credits it first, so fund every shard once
+		// with an authorization-shaped entry.
+		funded := map[ledger.AccountID]bool{}
+		for len(funded) < chart.Shards() {
+			pid := uuid.New()
+			acct := chart.For(ledger.UnallocatedReceipts, pid)
+			if funded[acct] {
+				continue
+			}
+			funded[acct] = true
+			check(pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+				return l.Post(ctx, tx, ledger.Entry{ID: uuid.New(), Kind: "authorization", RefID: pid, Postings: []ledger.Posting{
+					{Account: chart.For(ledger.BankReceivable, pid), Side: ledger.Debit, Amount: 1_000_000_000_000},
+					{Account: acct, Side: ledger.Credit, Amount: 1_000_000_000_000},
+				}})
+			}))
+		}
+	}
 	// Wallets have no balance limit, so random transfers never fail.
 	wallets := make([]ledger.AccountID, *accounts)
 	merchants := make([]ledger.AccountID, *accounts)
