@@ -111,9 +111,9 @@ Detailed plan: [IMPLEMENTATION_PLAN.md § Phase 5](IMPLEMENTATION_PLAN.md#phase-
 - [x] Simulation harness (`sim/`): seeded workload, ids, clock and in-process bank; 13 step kinds including crashes at all 11 crashpoints; invariants after every step; a drain; all 11 at the end; a trace hash for replay
 - [x] `cmd/sim` (`-seed N -v` to replay, `-seeds 10000 -parallel 8` to soak), `make sim SEED=…`, 200 seeds in CI
 - [x] Harness validated by planting four bugs (each caught by 9–39 of 40 seeds)
-- [ ] 10,000 seeds locally: 5,200 of 10,000 seeds done with 0 failures so far (the full run is still going; 200 seeds also pass on every CI run)
+- [ ] 10,000 seeds locally: 6,100 of 10,000 seeds passed with 0 failures; the run was paused and seeds 6,101–10,000 resume next (200 seeds also pass on every CI run)
 
-**Done-when check:** recon classified 320/320 injected faults and clean lines correctly (`TestReconAccuracy`). The 10,000-seed soak is past the halfway mark with no failures; the final count goes here when it ends.
+**Done-when check:** recon classified 320/320 injected faults and clean lines correctly (`TestReconAccuracy`). The 10,000-seed soak reached 6,100 seeds with no failures before it was paused on 2026-10-18; seeds 6,101–10,000 resume next (NEXT.md).
 
 Coverage of a 100-seed run (how many seeds reached each path): late successes in 24, auto refunds in 24, payouts in 92, every recon status in about 30, missing_in_ledger in 8, retried webhooks in 55, crashes at 10 of 11 points (payouts.after_bank needs a settlement run in the same step).
 
@@ -202,7 +202,7 @@ Crash test: 60 events, 60 delivered, 30 duplicates, 0 lost (`e2e/kill_test.go`).
 
 Reconciliation accuracy: 320/320 (100%) on a seeded day with 35 injected faults (`TestReconAccuracy`).
 
-Simulation: 5,200 of 10,000 seeds done with 0 failures so far (the full run is still going; 200 seeds also pass on every CI run).
+Simulation: 6,100 of 10,000 seeds passed with 0 failures; the run was paused and seeds 6,101–10,000 resume next (200 seeds also pass on every CI run).
 
 Not measured yet: API latency under k6 (phase 6), webhook delivery p99, crash-recovery time.
 
