@@ -6,7 +6,7 @@ Kosh (कोष) means treasury.
 
 > **Live failure lab: https://kosh.namankundra.com**: kill processes, break the bank, take the merchant down, and watch the ledger stay balanced. Metrics are at [/grafana](https://kosh.namankundra.com/grafana/).
 >
-> **Status: phase 6 of 6 built and deployed; final load numbers still to measure.** The [build plan](IMPLEMENTATION_PLAN.md)'s ledger, payments with idempotency, events with webhooks, bank chaos with T+1 settlement, reconciliation, the simulation harness, metrics, the failure lab and the deploy are built. Progress is in [progress.md](progress.md) and the queue in [NEXT.md](NEXT.md).
+> **Status: phase 6 of 6 built, deployed and measured.** The [build plan](IMPLEMENTATION_PLAN.md)'s ledger, payments with idempotency, events with webhooks, bank chaos with T+1 settlement, reconciliation, the simulation harness, metrics, the failure lab and the deploy are built. Progress is in [progress.md](progress.md) and the queue in [NEXT.md](NEXT.md).
 
 ## What's built
 
@@ -77,19 +77,33 @@ The lab runs every Kosh process as a child, so the dashboard can kill any of the
 
 ## Numbers
 
-These are measured, not targets. Hardware: Intel Core i5-13450HX (10 cores / 16 threads), 16 GB RAM, Windows 11, with Postgres 16 in Docker Desktop (WSL 2) at default settings (`fsync` on). Each run lasted 15 seconds; reproduce with `go run ./cmd/ledgerbench -mode <mode> -workers <n>`.
+These are measured, not targets. Hardware: Intel Core i5-13450HX (10 cores / 16 threads), 16 GB RAM, Windows 11, with Postgres 16 in Docker Desktop (WSL 2) at the compose settings (`fsync` on). Full method and every run are in [loadtest/RESULTS.md](loadtest/RESULTS.md).
+
+**The API under k6** (60 s constant-arrival-rate runs; a sale is order, then payment, then capture, so 3 requests; bank at 1–3 ms):
+
+| Scenario | Sustained | Request p50 | Request p99 | Errors |
+| --- | --- | --- | --- | --- |
+| Steady, 50 merchants, 100 sales/s | 99 sales/s (298 req/s) | 16 ms | 109 ms | 0% |
+| Steady, 50 merchants, 300 sales/s, 64-connection pool | 295 sales/s (887 req/s) | 64 ms | 386 ms | 0% |
+| One hot merchant, 100 sales/s | 100 sales/s | 14 ms | 31 ms | 0% |
+| Webhook fan-out, 300 events/s | 100 sales/s; delivery p99 30 s | 15 ms | 33 ms | 0% |
+
+With the default pool of 16 connections, steady traffic tops out near 220 sales/s, limited by the pool and not by locks. With 64 connections it reaches about 300 sales/s. One hot merchant tops out near 150 sales/s on its own payable row. One dispatcher keeps up at 150 events/s (delivery p99 2 s) but falls behind at 300.
+
+**The ledger alone** (`go run ./cmd/ledgerbench -mode <mode> -workers <n> [-shards <n>]`, 15 s runs, all in one session):
 
 | Ledger workload | Workers | Throughput | p50 | p99 |
 | --- | --- | --- | --- | --- |
-| Transfers between random accounts (no shared rows) | 1 | 178 /s | 5.5 ms | 8.8 ms |
-| Transfers between random accounts (no shared rows) | 16 | 1,928 /s | 7.6 ms | 22.4 ms |
-| Transfers between random accounts (no shared rows) | 32 | 2,141 /s | 12.5 ms | 43.6 ms |
-| Every transfer credits one merchant (hot account) | 16 | 318 /s | 11.8 ms | 693 ms |
-| Capture-shaped entries (receivable, merchant, fee, GST) | 16 | 278 /s | 12.5 ms | 576 ms |
+| Transfers between random accounts (no shared rows) | 1 | 123 /s | 7.5 ms | 15 ms |
+| Transfers between random accounts (no shared rows) | 16 | 2,112 /s | 7.1 ms | 16 ms |
+| Transfers between random accounts (no shared rows) | 32 | 2,513 /s | 11.3 ms | 36 ms |
+| Every transfer credits one merchant (hot account) | 16 | 190 /s | 16.5 ms | 1,149 ms |
+| Capture-shaped entries, system accounts unsharded | 16 | 183 /s | 17.8 ms | 734 ms |
+| Capture-shaped entries, 16 shards | 16 | 1,700 /s | 8.0 ms | 27 ms |
 
-The last row is the interesting one. Every capture debits `bank_receivable` and credits `fee_revenue` and `gst_payable`. Those three rows are shared by every payment in the system, so captures serialize on their row locks. Throughput drops 7× and p99 goes from 22 ms to over half a second. That is the hot-account problem, measured. [ADR 0003](docs/adr/0003-pessimistic-locking.md) explains why the locking is built this way. The fix, sharding those accounts by payment id, is now built; its before/after measurement is next in [NEXT.md](NEXT.md).
+**Sharding, before and after.** Every capture debits `unallocated_receipts` and credits the merchant, `fee_revenue` and `gst_payable`. Unsharded, those system rows are shared by every payment, so captures serialize on their row locks: 183 postings/s at a p99 of 734 ms. Splitting each hot system account into 16 shards picked from the payment id gives 1,700/s at 27 ms, 9× the throughput at a 27× lower p99, or 80% of the no-contention ceiling. Through the whole API, steady traffic on an unsharded database tops out at 87 sales/s with a lock-wait p99 of 246 ms. With 16 shards it carries 197 sales/s, and at 100 sales/s lock-wait p99 drops to 7.6 ms. [ADR 0003](docs/adr/0003-pessimistic-locking.md) has the design.
 
-**Simulation: 6,100 of 10,000 seeds passed with 0 failures; the run was paused and seeds 6,101–10,000 resume next (200 seeds also pass on every CI run).** Each seed is a fresh database and a seeded world (workload, ids, clock, retry jitter, and an in-process bank that declines, times out, answers late, goes down and sends duplicate callbacks). It runs 60 random steps, including crashes at named crashpoints, with every invariant checked after every step, then drains and checks all 11. Seeds replay exactly: `go run ./cmd/sim -seed 42 -v`. Planting any of four bugs by hand made between 9 and 39 of 40 seeds fail, so the harness does catch bugs.
+**Simulation: 10,000 of 10,000 seeds passed with 0 invariant violations (200 seeds also pass on every CI run).** Each seed is a fresh database and a seeded world (workload, ids, clock, retry jitter, and an in-process bank that declines, times out, answers late, goes down and sends duplicate callbacks). It runs 60 random steps, including crashes at named crashpoints, with every invariant checked after every step, then drains and checks all 11. Seeds replay exactly: `go run ./cmd/sim -seed 42 -v`. Planting any of four bugs by hand made between 9 and 39 of 40 seeds fail, so the harness does catch bugs.
 
 **Reconciliation:** on a day of 300 payments and 20 refunds, with a bank file salted with fee-variance, missing, duplicate and amount-mismatch rows, recon classified 320 of 320 lines and injected faults correctly (`TestReconAccuracy`).
 
@@ -148,7 +162,7 @@ These are the spec. Each is a SQL query in [`invariants/`](invariants) that retu
 - **Hold deadlines are not commit deadlines.** If the bank confirms a refund or payout after its hold's deadline, the money still moved, so the hold is committed anyway. Expiry asks the bank before it voids anything ([ADR 0005](docs/adr/0005-hold-deadlines.md)).
 - **Reconciliation** reads the bank's daily file and matches each line to a bank-confirmed payment or refund, by bank reference and then by Kosh's id. It classifies each one as `matched`, `fee_variance`, `amount_mismatch`, `duplicate`, `missing_in_ledger`, or (for an item that never showed up by T+2) `missing_in_bank`. One entry per file moves cash into `bank_settlement`. Every difference goes to `recon_suspense`, and resolving an exception posts an adjusting entry; nothing is edited. A missing item that turns up later closes its own exception.
 - **The simulation harness** (`sim/`) runs one goroutine against a fake clock and a seeded bank, so a seed fixes the whole run, and a trace hash proves a replay matched. Postgres is real and is not replayed; with one goroutine, nothing in it races.
-- **Hot accounts are sharded.** The four system accounts every payment touches have 16 shards each, picked from the payment id, so payments stop queueing on one row lock (ADR 0003). The before/after numbers are next in [NEXT.md](NEXT.md).
+- **Hot accounts are sharded.** The four system accounts every payment touches have 16 shards each, picked from the payment id, so payments stop queueing on one row lock: capture-shaped postings go from 183/s to 1,700/s (ADR 0003, [Numbers](#numbers)).
 - **The failure lab** (`cmd/lab` plus `dashboard/`) runs every process as a child, so the dashboard can SIGKILL any of them, switch the bank into flaky, late or outage mode, break the merchant's endpoint, and drive traffic, while it re-checks the invariants every 5 s.
 - **T+1 settlement.** Each merchant is paid its available balance minus the credits it earned today, so refunds and open holds are netted out and today's sales wait for tomorrow. A payout is a two-phase hold: it posts on bank success and voids on failure, and a failed payout is picked up by the next day's batch. Payouts never time out: failing one the bank later completes would pay twice.
 - **Events** use a transactional outbox, not dual writes. The relay publishes rows and marks them published only after Kafka acknowledges them. A crash in between republishes the batch, so delivery is at-least-once. The dispatcher dedupes with `ON CONFLICT`, and merchants dedupe by event id.
@@ -282,11 +296,12 @@ go run ./cmd/sim -seed 42 -v
 
 These are known limits, not bugs. Most are scheduled.
 
-- **One hot merchant.** System accounts are now sharded, but a single merchant's own payable can't be split without breaking "never negative", so one very busy merchant still serializes on its row. Batched postings are the planned option (NEXT.md).
+- **One hot merchant.** System accounts are now sharded, but a single merchant's own payable can't be split without breaking "never negative", so one very busy merchant still serializes on its row (about 150 sales/s on the laptop). Batched postings are the planned option (NEXT.md).
 - **Exceptions wait for a human.** Recon surfaces every disagreement (a refund the bank completed after Kosh gave up on it shows up as `missing_in_ledger`), but nothing alerts anyone or enforces an SLA on the queue. An auto refund the bank declines is not retried; its amount stays visible in `customer_refund_payable`.
 - **Uncaptured authorizations are never released.** Gateways auto-refund an authorization that isn't captured within a few days; in Kosh the money stays in `unallocated_receipts`.
 - **The simulation is single-goroutine.** That is what makes it replayable. Concurrency bugs are covered by the race-detector tests and `TestBankChaos` instead, and those are not replayable step by step.
 - **A bank answer Kosh can't apply** (for example a reference that already belongs to another payment) leaves that one item pending and retrying with backoff. The rest of the batch carries on, but nobody is alerted yet.
+- **One dispatcher delivers about 150 events/s.** At 300 events/s its backlog grows and delivery p99 reaches 30 s. More dispatchers need a partitioned topic.
 - **Event order across relays.** With one relay, each payment's events reach Kafka in order. With several relays, batches can interleave. Every envelope carries the aggregate's `version`, so receivers can drop stale updates.
 - **At-least-once means duplicates.** The kill test delivered 30 duplicates for 60 events. Merchants must dedupe by `Kosh-Event-Id`.
 - **Determinism.** Postgres runs for real in every test. The app layer is deterministic (clock, ids, randomness and the bank all sit behind interfaces), but concurrent runs are not replayable step by step.

@@ -2,17 +2,11 @@
 
 ## Next session: start here
 
-1. Start Docker Desktop, then bring up the databases:
-   ```bash
-   docker compose up -d --wait
-   ```
-2. Finish the simulation soak from where it stopped (seeds 6,101–10,000, about 45 minutes; keep the laptop awake):
-   ```bash
-   go build -o bin/sim.exe ./cmd/sim && ./bin/sim.exe -start 6101 -seeds 3900 -parallel 8
-   ```
-3. With nothing else running, do the load tests and the sharding before/after (P1 items 2–3 below), then put the numbers in README.md, ADR 0003 and the resume line, and push.
+1. **Record the 2-minute demo** on the live site, following [docs/DEMO.md](docs/DEMO.md).
+2. **Make the repo public**, pin it on GitHub, and add the live link, the video and the resume line ([progress.md § Resume line](progress.md#resume-line)) to the portfolio and resume.
+3. Then the P0 items below: keep the live demo from hurting its neighbours.
 
-Written 2026-10-18. Phases 0–5 are done, and phase 6 is built and deployed at **https://kosh.namankundra.com**, with the final numbers still to measure. History is in [progress.md](progress.md) and design in [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md). This file is the queue, in priority order.
+Written 2026-10-18. Phases 0–5 are done, and phase 6 is built, deployed at **https://kosh.namankundra.com** and measured: the 10,000-seed soak passed with 0 failures, and the load numbers are in [loadtest/RESULTS.md](loadtest/RESULTS.md). History is in [progress.md](progress.md) and design in [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md). This file is the queue, in priority order.
 
 ## P0 · Keep the live demo from hurting its neighbours
 
@@ -35,10 +29,10 @@ Written 2026-10-18. Phases 0–5 are done, and phase 6 is built and deployed at 
 
 ## P1 · Finish Gate 2 (launch)
 
-1. **10,000-seed soak:** 6,100 passed with 0 failures, then paused. Resume with seeds 6,101–10,000 (see "Next session"), and record the final result in README and progress.md.
-2. **Load tests** on the laptop with nothing else running: `loadtest/run.sh steady.js`, `hot.js` and `fanout.js` at several rates. Write `loadtest/RESULTS.md` with p50/p99, throughput, error rate, lock-wait p99 from Grafana, and the hardware.
-3. **Hot-account before/after:** `ledgerbench -mode capture -shards 1` against `-shards 16`, plus the k6 steady run with `KOSH_SYSTEM_SHARDS=1` and with `16`. Add the result to ADR 0003 and the README.
-4. **Fill the resume line** in progress.md with the measured numbers.
+1. ~~**10,000-seed soak**~~ done 2026-10-18: 10,000 of 10,000 passed with 0 failures.
+2. ~~**Load tests**~~ done: [loadtest/RESULTS.md](loadtest/RESULTS.md). The API's pgx pool defaults to 16 connections and caps steady traffic near 220 sales/s; consider setting `pool_max_conns` in the deploy URLs.
+3. ~~**Hot-account before/after**~~ done: 183 → 1,700 capture postings/s, p99 734 → 27 ms (ADR 0003, README).
+4. ~~**Fill the resume line**~~ done ([progress.md § Resume line](progress.md#resume-line)).
 5. **Record the 2-minute demo** on the live site, following [docs/DEMO.md](docs/DEMO.md).
 6. **Make the repo public**, pin it on GitHub, and add the live link and video to the portfolio and resume.
 
@@ -52,6 +46,7 @@ Written 2026-10-18. Phases 0–5 are done, and phase 6 is built and deployed at 
 | One hot merchant still serializes on its own payable row | Batched postings: collect credits to one account for ~5 ms and apply them in one update; benchmark against the baseline | M |
 | Tables grow without bound | Retention jobs for published outbox rows, delivered webhooks, and idempotency keys (keep 7 days) | S |
 | Event order across several relays | Partition the relay by aggregate-id hash so each payment's events stay in one relay | M |
+| One dispatcher falls behind at ~300 events/s (delivery p99 30 s) | Partition the topic and run several dispatchers in one consumer group | M |
 | Concurrency isn't replayable | A multi-goroutine mode for the simulation that logs the interleaving and can replay it | L |
 
 ## P3 · Stretch (from the build plan, after launch)

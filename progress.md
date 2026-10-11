@@ -111,9 +111,9 @@ Detailed plan: [IMPLEMENTATION_PLAN.md § Phase 5](IMPLEMENTATION_PLAN.md#phase-
 - [x] Simulation harness (`sim/`): seeded workload, ids, clock and in-process bank; 13 step kinds including crashes at all 11 crashpoints; invariants after every step; a drain; all 11 at the end; a trace hash for replay
 - [x] `cmd/sim` (`-seed N -v` to replay, `-seeds 10000 -parallel 8` to soak), `make sim SEED=…`, 200 seeds in CI
 - [x] Harness validated by planting four bugs (each caught by 9–39 of 40 seeds)
-- [ ] 10,000 seeds locally: 6,100 of 10,000 seeds passed with 0 failures; the run was paused and seeds 6,101–10,000 resume next (200 seeds also pass on every CI run)
+- [x] 10,000 seeds locally: 10,000 of 10,000 passed with 0 failures (1–6,100 on 2026-10-17/18; 6,101–7,400 at 8 parallel and 7,393–10,000 at 16 parallel on 2026-10-18; 200 seeds also pass on every CI run)
 
-**Done-when check:** recon classified 320/320 injected faults and clean lines correctly (`TestReconAccuracy`). The 10,000-seed soak reached 6,100 seeds with no failures before it was paused on 2026-10-18; seeds 6,101–10,000 resume next (NEXT.md).
+**Done-when check:** recon classified 320/320 injected faults and clean lines correctly (`TestReconAccuracy`). The 10,000-seed soak finished on 2026-10-18 with no failures.
 
 Coverage of a 100-seed run (how many seeds reached each path): late successes in 24, auto refunds in 24, payouts in 92, every recon status in about 30, missing_in_ledger in 8, retried webhooks in 55, crashes at 10 of 11 points (payouts.after_bank needs a settlement run in the same step).
 
@@ -129,12 +129,14 @@ Detailed plan: [IMPLEMENTATION_PLAN.md § Phase 6](IMPLEMENTATION_PLAN.md#phase-
 - [x] Deploy kit for a fresh VM (`deploy/compose.prod.yml`, Caddy, `deploy.sh`) and a shared-host compose file
 - [x] **Deployed** to `operator-prod` beside Foreman, Nightshift and Fathom: https://kosh.namankundra.com (Let's Encrypt), Grafana at /grafana; about 20% CPU and 630 MB; the neighbours were untouched (Caddy hot-reloaded, not restarted)
 - [x] Demo shot list (`docs/DEMO.md`)
-- [ ] Load numbers and the sharding before/after (after the soak, so nothing competes for the database)
-- [ ] Resume line with measured numbers, demo video, repo public
+- [x] Load numbers and the sharding before/after ([loadtest/RESULTS.md](loadtest/RESULTS.md)): about 300 sales/s (900 req/s) at 0% errors; capture-shaped postings 183/s → 1,700/s with 16 shards
+- [x] Resume line with measured numbers (below)
+- [ ] Demo video, repo public
 
 Notes:
 
 - The failure lab survived a flaky bank, a failing merchant endpoint and SIGKILLs of the API, relay and dispatcher: 444 sales with 203 client retries, 1,346 webhooks delivered, debits equal to credits, 10/10 invariants holding.
+- `ledgerbench -mode capture` failed on its first post after sharding (`debits would exceed credits`). The sharding commit switched it to the real capture shape, which debits `unallocated_receipts`, but nothing credited that account first. It now funds each shard with an authorization-shaped entry. The benchmark was wrong, not the ledger: the limit check did its job.
 - In the first lab run invariant 3 failed on the dev database. Two payments from early smoke tests predate authorization entries, so they lack one. That's old data, not a bug, and it's why the lab uses its own `kosh_lab` database.
 
 ## Decisions
@@ -202,9 +204,26 @@ Crash test: 60 events, 60 delivered, 30 duplicates, 0 lost (`e2e/kill_test.go`).
 
 Reconciliation accuracy: 320/320 (100%) on a seeded day with 35 injected faults (`TestReconAccuracy`).
 
-Simulation: 6,100 of 10,000 seeds passed with 0 failures; the run was paused and seeds 6,101–10,000 resume next (200 seeds also pass on every CI run).
+Simulation: 10,000 of 10,000 seeds passed with 0 invariant violations (200 seeds also pass on every CI run).
 
-Not measured yet: API latency under k6 (phase 6), webhook delivery p99, crash-recovery time.
+Re-measured 2026-10-18, all in one session ([loadtest/RESULTS.md](loadtest/RESULTS.md)):
+
+| Ledger workload | Workers | Throughput | p50 | p99 |
+| --- | --- | --- | --- | --- |
+| No shared accounts | 1 | 123 /s | 7.5 ms | 15 ms |
+| No shared accounts | 16 | 2,112 /s | 7.1 ms | 16 ms |
+| No shared accounts | 32 | 2,513 /s | 11.3 ms | 36 ms |
+| One hot merchant | 16 | 190 /s | 16.5 ms | 1,149 ms |
+| Capture-shaped, 1 shard | 16 | 183 /s | 17.8 ms | 734 ms |
+| Capture-shaped, 16 shards | 16 | 1,700 /s | 8.0 ms | 27 ms |
+
+API under k6 (60 s runs, 3 requests per sale): 99 sales/s at request p99 109 ms. The ceiling is about 220 sales/s with the default 16-connection pool and about 300 sales/s (887 req/s, p99 386 ms) with 64 connections, at 0% errors throughout. Unsharded, the ceiling is 87 sales/s. One hot merchant tops out near 150 sales/s. Webhook delivery p99 is 2.0 s at 150 events/s and 30 s at 300 events/s, where one dispatcher falls behind.
+
+Not measured yet: crash-recovery time.
+
+## Resume line
+
+> Built Kosh, a payments core in Go and Postgres: a double-entry ledger with two-phase holds, signed at-least-once webhooks, and three-way reconciliation against bank settlement files. 0 invariant violations across 10,000 seeded crash runs; sharding hot ledger accounts raised capture throughput 9× (183 → 1,700 postings/s, p99 734 → 27 ms); the API sustains about 900 req/s at 0% errors on a laptop.
 
 ## Open questions
 
