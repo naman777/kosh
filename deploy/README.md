@@ -43,8 +43,9 @@ The script ships the committed code (`git archive HEAD`), builds the images on t
 ## Operating it
 
 - Logs: `sudo docker compose -f docker-compose.yml -f deploy/compose.prod.yml --profile stack logs -f lab`
-- The lab starts with 2 sales per second of traffic; visitors can raise it to 100.
-- Visitors can kill processes. Nothing restarts them automatically except the Start button, by design. If the VM itself restarts, `restart: unless-stopped` brings every container back and the lab restarts all processes.
+- The lab starts with 2 sales per second of traffic; visitors can raise it to 100. Traffic runs only while a dashboard is open: after 10 minutes with no visible dashboard polling, it pauses, and the invariant checks drop from every 5 s to every 30 s.
+- Visitors can kill processes and break the bank or the merchant's endpoint. A dead process restarts on its own after 3 minutes, and the bank, the endpoint and the traffic rate return to their defaults after 15 (`LAB_HEAL_AFTER`, `LAB_DEFAULTS_AFTER`). If the VM itself restarts, `restart: unless-stopped` brings every container back and the lab restarts all processes.
+- Every night at 04:00 IST the lab drops and recreates `kosh_lab` and creates the merchant again (`LAB_RESET_AT`, `LAB_TZ`; `LAB_RESET_AT=off` disables it). Ledger tables are append-only, so the database is dropped, not emptied.
 - Grafana's anonymous access is read-only. Its admin password defaults to `kosh`; set `GRAFANA_ADMIN_PASSWORD` in the environment before deploying to change it.
 - Cost: an `e2-standard-2` runs roughly US$50 a month; stop the VM when you're not demoing.
 

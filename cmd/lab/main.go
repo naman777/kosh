@@ -5,7 +5,12 @@
 //	LAB_ADDR            control API (default :8095)
 //	LAB_BIN_DIR         where the Kosh binaries are (default: next to lab)
 //	LAB_DATA            where the lab keeps its merchant credentials (default ./lab-data)
-//	LAB_TRAFFIC         sales per second at start (default 5)
+//	LAB_TRAFFIC         sales per second at start, and the default it returns to (default 5)
+//	LAB_IDLE_AFTER      pause traffic when no dashboard has polled for this long (default 10m)
+//	LAB_HEAL_AFTER      restart a killed or crashed process after this long (default 3m)
+//	LAB_DEFAULTS_AFTER  return bank, merchant endpoint and traffic to defaults after this long (default 15m)
+//	LAB_RESET_AT        wipe the lab's data every day at HH:MM, or "off" (default 04:00)
+//	LAB_TZ              time zone for LAB_RESET_AT (default Asia/Kolkata)
 //	KOSH_DATABASE_URL   Postgres URL (default: kosh_lab on the compose Postgres, created if missing)
 //	KOSH_KAFKA_BROKERS  Redpanda brokers (default localhost:19092)
 //
@@ -34,6 +39,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -69,18 +75,28 @@ type event struct {
 }
 
 type lab struct {
-	log     *slog.Logger
-	pool    *pgxpool.Pool
-	binDir  string
-	procs   map[string]*proc
-	traffic *traffic
-	hc      *http.Client
+	log      *slog.Logger
+	pool     atomic.Pointer[pgxpool.Pool] // replaced by a nightly reset; use db()
+	dbURL    string
+	binDir   string
+	procs    map[string]*proc
+	traffic  *traffic
+	hc       *http.Client
+	cbSecret string
+	up       upkeep
+	wake     chan struct{} // runs the invariant checks now
 
 	mu         sync.Mutex
 	events     []event
 	bankPreset string
 	mode       string
 	inv        invariantsView
+	// What visitors changed, and when, so upkeep can undo it.
+	wantRate                        int
+	bankSince, modeSince, rateSince time.Time
+	lastSeen                        time.Time
+	paused                          bool // no one is watching: traffic stopped
+	resetting                       bool
 }
 
 type invariantsView struct {
@@ -118,19 +134,27 @@ func run(log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	defer pool.Close()
 	if err := db.Migrate(ctx, pool); err != nil {
+		pool.Close()
 		return err
 	}
 	c, err := merchantCreds(ctx, pool)
 	if err != nil {
+		pool.Close()
 		return err
 	}
 
+	up, err := upkeepFromEnv()
+	if err != nil {
+		return err
+	}
 	exe, _ := os.Executable()
-	l := &lab{log: log, pool: pool, binDir: env.String("LAB_BIN_DIR", filepath.Dir(exe)),
-		procs: map[string]*proc{}, hc: &http.Client{Timeout: 5 * time.Second}, mode: "ok"}
 	admin, cbSecret := token(), token()
+	l := &lab{log: log, dbURL: dbURL, binDir: env.String("LAB_BIN_DIR", filepath.Dir(exe)),
+		procs: map[string]*proc{}, hc: &http.Client{Timeout: 5 * time.Second}, mode: "ok",
+		cbSecret: cbSecret, up: up, wake: make(chan struct{}, 1), lastSeen: time.Now()}
+	l.pool.Store(pool)
+	defer func() { l.db().Close() }()
 	common := []string{
 		"KOSH_DATABASE_URL=" + dbURL,
 		"KOSH_KAFKA_BROKERS=" + env.String("KOSH_KAFKA_BROKERS", "localhost:19092"),
@@ -158,26 +182,36 @@ func run(log *slog.Logger) error {
 		l.note("started " + name)
 	}
 	l.waitHealthy(ctx)
-	l.setBank(ctx, "healthy", cbSecret)
+	l.setBank(ctx, "healthy")
 	l.traffic = newTraffic(apiURL, c.APIKey)
-	l.traffic.setRate(env.Int("LAB_TRAFFIC", 5))
+	l.setTraffic(up.defaultRate)
 
 	go l.checkLoop(ctx)
+	go l.upkeepLoop(ctx)
+	go l.resetLoop(ctx)
 	metrics.Serve(":9104", log)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /lab/state", l.state)
-	mux.HandleFunc("POST /lab/process/{name}/{action}", l.processAction)
+	mux.HandleFunc("GET /lab/state", func(w http.ResponseWriter, r *http.Request) {
+		l.touch()
+		l.state(w, r)
+	})
+	mux.HandleFunc("POST /lab/process/{name}/{action}", func(w http.ResponseWriter, r *http.Request) {
+		l.touch()
+		l.processAction(w, r)
+	})
 	mux.HandleFunc("POST /lab/bank", func(w http.ResponseWriter, r *http.Request) {
+		l.touch()
 		var in struct{ Preset string }
 		json.NewDecoder(r.Body).Decode(&in)
-		if err := l.setBank(r.Context(), in.Preset, cbSecret); err != nil {
+		if err := l.setBank(r.Context(), in.Preset); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("POST /lab/merchant", func(w http.ResponseWriter, r *http.Request) {
+		l.touch()
 		var in struct{ Mode string }
 		json.NewDecoder(r.Body).Decode(&in)
 		if err := l.setMerchant(r.Context(), in.Mode); err != nil {
@@ -187,11 +221,10 @@ func run(log *slog.Logger) error {
 		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("POST /lab/traffic", func(w http.ResponseWriter, r *http.Request) {
+		l.touch()
 		var in struct{ Rate int }
 		json.NewDecoder(r.Body).Decode(&in)
-		in.Rate = max(0, min(in.Rate, 100))
-		l.traffic.setRate(in.Rate)
-		l.note(fmt.Sprintf("traffic → %d sales/s", in.Rate))
+		l.setTraffic(max(0, min(in.Rate, 100)))
 		w.WriteHeader(http.StatusNoContent)
 	})
 	addr := env.String("LAB_ADDR", ":8095")
@@ -209,6 +242,8 @@ func run(log *slog.Logger) error {
 	}
 	return err
 }
+
+func (l *lab) db() *pgxpool.Pool { return l.pool.Load() }
 
 // ensureDatabase creates the lab's database if it doesn't exist, so the
 // demo never shares (or trips over) a development database.
@@ -310,13 +345,13 @@ var bankPresets = map[string]map[string]any{
 	"outage":  {"outage": true},
 }
 
-func (l *lab) setBank(ctx context.Context, preset, cbSecret string) error {
+func (l *lab) setBank(ctx context.Context, preset string) error {
 	p, ok := bankPresets[preset]
 	if !ok {
 		return fmt.Errorf("unknown bank preset %q", preset)
 	}
 	cfg := map[string]any{"latency_min_ms": 5, "latency_max_ms": 30, "hang_for_ms": 35000, "final_after_ms": 2000,
-		"callback_url": apiURL + "/bank/callbacks", "callback_secret": cbSecret, "callback_delay_ms": 200, "max_duplicate_callbacks": 1}
+		"callback_url": apiURL + "/bank/callbacks", "callback_secret": l.cbSecret, "callback_delay_ms": 200, "max_duplicate_callbacks": 1}
 	for k, v := range p {
 		cfg[k] = v
 	}
@@ -324,7 +359,7 @@ func (l *lab) setBank(ctx context.Context, preset, cbSecret string) error {
 		return err
 	}
 	l.mu.Lock()
-	l.bankPreset = preset
+	l.bankPreset, l.bankSince = preset, time.Now()
 	l.mu.Unlock()
 	l.note("bank → " + preset)
 	return nil
@@ -335,7 +370,7 @@ func (l *lab) setMerchant(ctx context.Context, mode string) error {
 		return err
 	}
 	l.mu.Lock()
-	l.mode = mode
+	l.mode, l.modeSince = mode, time.Now()
 	l.mu.Unlock()
 	l.note("merchant endpoint → " + mode)
 	return nil
@@ -366,14 +401,15 @@ func (l *lab) processAction(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// checkLoop runs the invariants every few seconds. Invariant 8 ("every event
+// checkLoop runs the invariants every few seconds (every 30 s when no one is
+// watching). Invariant 8 ("every event
 // is eventually delivered") is left out: while the lab is breaking things it
 // is supposed to be temporarily false, and the backlog tile shows it.
 func (l *lab) checkLoop(ctx context.Context) {
 	ids := []int{1, 2, 3, 4, 5, 6, 7, 9, 10, 11}
 	for ctx.Err() == nil {
 		cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-		rep, err := invariants.Check(cctx, l.pool, ids...)
+		rep, err := invariants.Check(cctx, l.db(), ids...)
 		cancel()
 		v := invariantsView{CheckedAt: time.Now(), Total: len(ids)}
 		if err != nil {
@@ -393,7 +429,32 @@ func (l *lab) checkLoop(ctx context.Context) {
 		l.mu.Unlock()
 		select {
 		case <-ctx.Done():
-		case <-time.After(5 * time.Second):
+		case <-l.wake:
+		case <-time.After(l.checkInterval()):
 		}
 	}
+}
+
+func upkeepFromEnv() (upkeep, error) {
+	up := upkeep{
+		idleAfter:     env.Duration("LAB_IDLE_AFTER", 10*time.Minute),
+		healAfter:     env.Duration("LAB_HEAL_AFTER", 3*time.Minute),
+		defaultsAfter: env.Duration("LAB_DEFAULTS_AFTER", 15*time.Minute),
+		defaultRate:   max(0, min(env.Int("LAB_TRAFFIC", 5), 100)),
+		resetAt:       env.String("LAB_RESET_AT", "04:00"),
+	}
+	if up.resetAt == "off" {
+		up.resetAt = ""
+	}
+	loc, err := time.LoadLocation(env.String("LAB_TZ", "Asia/Kolkata"))
+	if err != nil {
+		return up, fmt.Errorf("LAB_TZ: %w", err)
+	}
+	up.loc = loc
+	if up.resetAt != "" {
+		if _, err := nextReset(time.Now(), up.resetAt, loc); err != nil {
+			return up, err
+		}
+	}
+	return up, nil
 }

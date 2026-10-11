@@ -110,10 +110,14 @@ export default function Lab() {
     setNow(Date.now());
   }, [logsFor]);
 
+  // Poll only while the tab is visible: the lab pauses traffic when no one
+  // has polled for 10 minutes, and a forgotten background tab shouldn't count.
   useEffect(() => {
-    poll();
-    const t = setInterval(poll, 1000);
-    return () => clearInterval(t);
+    const tick = () => { if (!document.hidden) poll(); };
+    tick();
+    const t = setInterval(tick, 1000);
+    document.addEventListener('visibilitychange', tick);
+    return () => { clearInterval(t); document.removeEventListener('visibilitychange', tick); };
   }, [poll]);
 
   const act = async (key, path, body) => {
@@ -179,7 +183,7 @@ export default function Lab() {
                 </div>
               ))}
             </div>
-            <p className="hint">Kill sends SIGKILL: no shutdown, no flush. Nothing restarts on its own.</p>
+            <p className="hint">Kill sends SIGKILL: no shutdown, no flush. A killed process restarts on its own after 3 minutes.</p>
           </section>
 
           <section className="panel">
@@ -189,7 +193,7 @@ export default function Lab() {
                 <button key={k} aria-pressed={s?.bank === k} disabled={busy === `bank-${k}`} onClick={() => act(`bank-${k}`, '/lab/bank', { preset: k })}>{label}</button>
               ))}
             </div>
-            <p className="hint">{BANK.find(([k]) => k === s?.bank)?.[2] || ''}</p>
+            <p className="hint">{BANK.find(([k]) => k === s?.bank)?.[2] || ''}{s && s.bank !== 'healthy' ? ' Back to Healthy on its own after 15 minutes.' : ''}</p>
           </section>
 
           <section className="panel">
@@ -199,7 +203,7 @@ export default function Lab() {
                 <button key={k} aria-pressed={s?.merchant_endpoint === k} disabled={busy === `m-${k}`} onClick={() => act(`m-${k}`, '/lab/merchant', { mode: k })}>{label}</button>
               ))}
             </div>
-            <p className="hint">{MERCHANT.find(([k]) => k === s?.merchant_endpoint)?.[2] || ''}</p>
+            <p className="hint">{MERCHANT.find(([k]) => k === s?.merchant_endpoint)?.[2] || ''}{s && s.merchant_endpoint !== 'ok' ? ' Back to Up on its own after 15 minutes.' : ''}</p>
           </section>
 
           <section className="panel">
@@ -209,7 +213,7 @@ export default function Lab() {
                 <button key={r} aria-pressed={s?.traffic?.rate === r} disabled={busy === `t-${r}`} onClick={() => act(`t-${r}`, '/lab/traffic', { rate: r })}>{r ? `${r}/s` : 'Stop'}</button>
               ))}
             </div>
-            <p className="hint">Each sale is order → payment → capture; 15% get a partial refund. Clients retry with the same Idempotency-Key.</p>
+            <p className="hint">Each sale is order → payment → capture; 15% get a partial refund. Clients retry with the same Idempotency-Key. Traffic pauses when no one is watching, and the lab starts fresh every night at 04:00 IST.</p>
           </section>
         </aside>
 

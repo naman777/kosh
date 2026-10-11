@@ -8,21 +8,25 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 )
 
-// proc is one supervised Kosh process. The lab never restarts a process by
-// itself: killing one and watching the system cope is the point.
+// proc is one supervised Kosh process. Killing one and watching the system
+// cope is the point, so the lab leaves a dead process down for a while
+// (LAB_HEAL_AFTER) before it restarts it, so the demo is whole again for the
+// next visitor.
 type proc struct {
 	name string
-	env  []string
 
 	mu        sync.Mutex
+	env       []string
 	cmd       *exec.Cmd
 	state     string // running | stopped | crashed
 	pid       int
 	started   time.Time
+	downSince time.Time // when it stopped or crashed; zero while running
 	restarts  int
 	lastExit  string
 	logs      []string // last 200 lines
@@ -61,13 +65,14 @@ func (p *proc) start(dir string) error {
 	}
 	cmd.Stderr = cmd.Stdout
 	if err := cmd.Start(); err != nil {
-		p.state, p.lastExit = "crashed", err.Error()
+		p.state, p.lastExit, p.downSince = "crashed", err.Error(), time.Now()
 		return fmt.Errorf("start %s: %w", p.name, err)
 	}
 	if !p.started.IsZero() {
 		p.restarts++
 	}
 	p.cmd, p.state, p.pid, p.started, p.stopAsked = cmd, "running", cmd.Process.Pid, time.Now(), false
+	p.downSince = time.Time{}
 	go p.capture(out)
 	go p.wait(cmd)
 	return nil
@@ -93,7 +98,7 @@ func (p *proc) wait(cmd *exec.Cmd) {
 	if p.cmd != cmd {
 		return
 	}
-	p.pid = 0
+	p.pid, p.downSince = 0, time.Now()
 	if p.stopAsked {
 		p.state, p.lastExit = "stopped", "killed by the lab"
 		return
@@ -116,6 +121,26 @@ func (p *proc) kill() error {
 	}
 	p.stopAsked = true
 	return p.cmd.Process.Kill()
+}
+
+// setEnv replaces KEY=... in the environment the next start uses.
+func (p *proc) setEnv(key, value string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	kept := p.env[:0:0]
+	for _, kv := range p.env {
+		if !strings.HasPrefix(kv, key+"=") {
+			kept = append(kept, kv)
+		}
+	}
+	p.env = append(kept, key+"="+value)
+}
+
+// down reports whether the process is not running, and since when.
+func (p *proc) down() (bool, time.Time) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.state != "running", p.downSince
 }
 
 func (p *proc) view(withLogs bool) procView {

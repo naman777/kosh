@@ -36,6 +36,7 @@ type stateView struct {
 func (l *lab) state(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
+	pool := l.db()
 	v := stateView{Now: time.Now(), Payments: map[string]int64{}, Outbox: map[string]any{},
 		Webhooks: map[string]int64{}, Recon: map[string]int64{}, Payouts: map[string]int64{}}
 	withLogs := r.URL.Query().Get("logs") == "1"
@@ -48,7 +49,7 @@ func (l *lab) state(w http.ResponseWriter, r *http.Request) {
 	v.Events = append([]event(nil), l.events...)
 	l.mu.Unlock()
 
-	if err := l.pool.QueryRow(ctx, `SELECT COALESCE(sum(posted_dr), 0), COALESCE(sum(posted_cr), 0),
+	if err := pool.QueryRow(ctx, `SELECT COALESCE(sum(posted_dr), 0), COALESCE(sum(posted_cr), 0),
 		COALESCE(sum(pending_dr), 0), COALESCE(sum(pending_cr), 0), (SELECT count(*) FROM journal_entries) FROM accounts`).Scan(
 		&v.Ledger.PostedDr, &v.Ledger.PostedCr, &v.Ledger.PendingDr, &v.Ledger.PendingCr, &v.Ledger.Entries); err != nil {
 		v.Error = err.Error()
@@ -56,7 +57,7 @@ func (l *lab) state(w http.ResponseWriter, r *http.Request) {
 	v.Ledger.Balanced = v.Ledger.PostedDr == v.Ledger.PostedCr && v.Ledger.PendingDr == v.Ledger.PendingCr
 
 	counts := func(sql string, into map[string]int64) {
-		rows, err := l.pool.Query(ctx, sql)
+		rows, err := pool.Query(ctx, sql)
 		if err != nil {
 			return
 		}
@@ -83,7 +84,7 @@ func (l *lab) state(w http.ResponseWriter, r *http.Request) {
 		oldest      float64
 		published   int64
 	)
-	l.pool.QueryRow(ctx, `SELECT count(*) FILTER (WHERE published_at IS NULL), count(*) FILTER (WHERE published_at IS NOT NULL),
+	pool.QueryRow(ctx, `SELECT count(*) FILTER (WHERE published_at IS NULL), count(*) FILTER (WHERE published_at IS NOT NULL),
 		COALESCE(EXTRACT(EPOCH FROM now() - min(created_at) FILTER (WHERE published_at IS NULL)), 0) FROM outbox`).Scan(
 		&unpublished, &published, &oldest)
 	v.Outbox["unpublished"], v.Outbox["published"], v.Outbox["oldest_seconds"] = unpublished, published, oldest

@@ -16,11 +16,11 @@ import (
 // client: same Idempotency-Key, on 5xx, 409 or a dropped connection.
 type traffic struct {
 	base string
-	key  string
 	hc   *http.Client
 
 	mu   sync.Mutex
-	rate int // sales per second; 0 = stopped
+	key  string // the lab merchant's API key; replaced by a nightly reset
+	rate int    // sales per second; 0 = stopped
 	stop chan struct{}
 
 	started, completed, failed, refunds, retries atomic.Int64
@@ -46,6 +46,17 @@ func (t *traffic) view() trafficView {
 	t.mu.Unlock()
 	return trafficView{Rate: rate, Started: t.started.Load(), Completed: t.completed.Load(),
 		Failed: t.failed.Load(), Refunds: t.refunds.Load(), Retries: t.retries.Load()}
+}
+
+// restart points traffic at a new merchant and zeroes the counters. Call it
+// with traffic stopped.
+func (t *traffic) restart(key string) {
+	t.mu.Lock()
+	t.key = key
+	t.mu.Unlock()
+	for _, c := range []*atomic.Int64{&t.started, &t.completed, &t.failed, &t.refunds, &t.retries} {
+		c.Store(0)
+	}
 }
 
 // setRate changes the arrival rate; 0 stops traffic.
@@ -84,13 +95,16 @@ func (t *traffic) setRate(rate int) {
 // call POSTs with retries and returns the decoded body of the final 2xx/4xx.
 func (t *traffic) call(path, key string, body any) (int, map[string]any) {
 	raw, _ := json.Marshal(body)
+	t.mu.Lock()
+	apiKey := t.key
+	t.mu.Unlock()
 	for attempt := 0; attempt < 6; attempt++ {
 		if attempt > 0 {
 			t.retries.Add(1)
 			time.Sleep(time.Duration(200*attempt) * time.Millisecond)
 		}
 		req, _ := http.NewRequest(http.MethodPost, t.base+path, bytes.NewReader(raw))
-		req.Header.Set("Authorization", "Bearer "+t.key)
+		req.Header.Set("Authorization", "Bearer "+apiKey)
 		req.Header.Set("Idempotency-Key", key)
 		req.Header.Set("Content-Type", "application/json")
 		resp, err := t.hc.Do(req)

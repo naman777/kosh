@@ -129,6 +129,7 @@ Detailed plan: [IMPLEMENTATION_PLAN.md § Phase 6](IMPLEMENTATION_PLAN.md#phase-
 - [x] Deploy kit for a fresh VM (`deploy/compose.prod.yml`, Caddy, `deploy.sh`) and a shared-host compose file
 - [x] **Deployed** to `operator-prod` beside Foreman, Nightshift and Fathom: https://kosh.namankundra.com (Let's Encrypt), Grafana at /grafana; about 20% CPU and 630 MB; the neighbours were untouched (Caddy hot-reloaded, not restarted)
 - [x] Demo shot list (`docs/DEMO.md`)
+- [x] The lab looks after itself (`cmd/lab/upkeep.go`): traffic only while a dashboard is visible, invariant checks back off when idle, killed processes restart after 3 min, failure modes reset after 15, and `kosh_lab` is recreated nightly at 04:00 IST. Tested locally; not deployed yet
 - [x] Load numbers and the sharding before/after ([loadtest/RESULTS.md](loadtest/RESULTS.md)): about 300 sales/s (900 req/s) at 0% errors; capture-shaped postings 183/s → 1,700/s with 16 shards
 - [x] Resume line with measured numbers (below)
 - [ ] Demo video, repo public
@@ -137,6 +138,7 @@ Notes:
 
 - The failure lab survived a flaky bank, a failing merchant endpoint and SIGKILLs of the API, relay and dispatcher: 444 sales with 203 client retries, 1,346 webhooks delivered, debits equal to credits, 10/10 invariants holding.
 - `ledgerbench -mode capture` failed on its first post after sharding (`debits would exceed credits`). The sharding commit switched it to the real capture shape, which debits `unallocated_receipts`, but nothing credited that account first. It now funds each shard with an authorization-shaped entry. The benchmark was wrong, not the ledger: the limit check did its job.
+- The first version of the nightly reset emptied the lab's tables with `TRUNCATE`, and the ledger's append-only trigger refused it (`TRUNCATE on journal_entries is not allowed`). That was the guarantee working. The reset now drops and recreates the database. The same test showed that a failed reset left every process down, so the reset now restarts everything even when the wipe fails.
 - In the first lab run invariant 3 failed on the dev database. Two payments from early smoke tests predate authorization entries, so they lack one. That's old data, not a bug, and it's why the lab uses its own `kosh_lab` database.
 
 ## Decisions

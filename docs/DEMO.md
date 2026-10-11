@@ -2,7 +2,7 @@
 
 The build plan's brief: follow one payment's journal entries through one injected failure, with the failure lab on screen. The script is about 260 spoken words, so speak at a normal pace.
 
-**Setup before recording:** `docker compose up -d --wait`, then `go run ./cmd/lab` and `npm --prefix dashboard run dev`. Open the dashboard (localhost:3005) at 1280 px wide, set traffic to 5/s, set the bank to Healthy, and open a terminal with `psql` on `kosh_lab` beside it.
+**Setup before recording:** `docker compose up -d --wait`, then `go run ./cmd/lab` and `npm --prefix dashboard run dev`. Open the dashboard (localhost:3005) at 1280 px wide, set traffic to 5/s, set the bank to Healthy, and open a terminal with `psql` on `kosh_lab` beside it. A killed process restarts on its own after 3 minutes, so do each kill scene inside that window, or start the lab with `LAB_HEAL_AFTER=30m`. Don't record across 04:00 IST, when the lab resets.
 
 | Time | On screen | Say |
 | --- | --- | --- |
