@@ -2,7 +2,7 @@
 
 ## Next session: start here
 
-1. **Deploy the self-maintaining lab** to `operator-prod` (P0 below: built and tested locally, not deployed yet), then check the "done when" column there.
+1. **Check the self-maintaining lab on `operator-prod`** against the "done when" column below (deployed 2026-10-18, first nightly reset 2026-10-19 04:00 IST).
 2. **Record the 2-minute demo** on the live site, following [docs/DEMO.md](docs/DEMO.md).
 3. **Make the repo public**, pin it on GitHub, and add the live link, the video and the resume line ([progress.md § Resume line](progress.md#resume-line)) to the portfolio and resume.
 
@@ -12,7 +12,7 @@ Written 2026-10-18. Phases 0–5 are done, and phase 6 is built, deployed at **h
 
 `operator-prod` is shared with Foreman, Nightshift and Fathom (2 vCPUs). The lab runs 1 sale/s around the clock, which is about 86,000 payments a day, and it re-runs the invariants every 5 s. Those queries scan whole tables, so both the database and its CPU cost grow every day.
 
-All four are built (`cmd/lab/upkeep.go`) and tested locally on 2026-10-18 with short timers: a killed relay came back on its own, traffic paused with no visitor (0 new payments) and resumed on the next poll, the bank and merchant modes returned to their defaults, and a reset gave a fresh database with a new merchant, webhooks verifying under the new secret and 10/10 invariants. **Not deployed yet.** After deploying, check the "done when" column on the server.
+All four are built (`cmd/lab/upkeep.go`) and tested locally on 2026-10-18 with short timers: a killed relay came back on its own, traffic paused with no visitor (0 new payments) and resumed on the next poll, the bank and merchant modes returned to their defaults, and a reset gave a fresh database with a new merchant, webhooks verifying under the new secret and 10/10 invariants. **Deployed to `operator-prod` on 2026-10-18.** Before the deploy, the live lab had 1,318 payments in 17 MB, with `kosh-postgres` at 10.4% CPU. Check the "done when" column after the first night.
 
 | Task | Why | Done when |
 | --- | --- | --- |

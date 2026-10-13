@@ -129,7 +129,7 @@ Detailed plan: [IMPLEMENTATION_PLAN.md § Phase 6](IMPLEMENTATION_PLAN.md#phase-
 - [x] Deploy kit for a fresh VM (`deploy/compose.prod.yml`, Caddy, `deploy.sh`) and a shared-host compose file
 - [x] **Deployed** to `operator-prod` beside Foreman, Nightshift and Fathom: https://kosh.namankundra.com (Let's Encrypt), Grafana at /grafana; about 20% CPU and 630 MB; the neighbours were untouched (Caddy hot-reloaded, not restarted)
 - [x] Demo shot list (`docs/DEMO.md`)
-- [x] The lab looks after itself (`cmd/lab/upkeep.go`): traffic only while a dashboard is visible, invariant checks back off when idle, killed processes restart after 3 min, failure modes reset after 15, and `kosh_lab` is recreated nightly at 04:00 IST. Tested locally; not deployed yet
+- [x] The lab looks after itself (`cmd/lab/upkeep.go`): traffic only while a dashboard is visible, invariant checks back off when idle, killed processes restart after 3 min, failure modes reset after 15, and `kosh_lab` is recreated nightly at 04:00 IST. Tested locally and deployed to `operator-prod` on 2026-10-18
 - [x] Load numbers and the sharding before/after ([loadtest/RESULTS.md](loadtest/RESULTS.md)): about 300 sales/s (900 req/s) at 0% errors; capture-shaped postings 183/s → 1,700/s with 16 shards
 - [x] Resume line with measured numbers (below)
 - [ ] Demo video, repo public
