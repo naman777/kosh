@@ -3,6 +3,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 const HISTORY = 120; // seconds of sparkline
+// Grafana sits behind the same Caddy at /grafana/ on the live site. In local
+// dev it's on its own port: NEXT_PUBLIC_GRAFANA_URL=http://localhost:3002/
+const GRAFANA = process.env.NEXT_PUBLIC_GRAFANA_URL || '/grafana/';
 
 const rupees = (paise) =>
   (paise / 100).toLocaleString('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 2 });
@@ -140,6 +143,10 @@ export default function Lab() {
         <div>
           <h1>Kosh Failure Lab</h1>
           <p>Kill processes, break the bank, take the merchant down. The ledger has to stay balanced and every rule has to keep holding.</p>
+          <p className="links">
+            <a href={GRAFANA} target="_blank" rel="noreferrer">Live metrics in Grafana ↗</a>
+            <span>API latency, ledger lock waits, outbox lag, webhook delivery</span>
+          </p>
         </div>
         <div className="pills" aria-live="polite">
           {s ? (
